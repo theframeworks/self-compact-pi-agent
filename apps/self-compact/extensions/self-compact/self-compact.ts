@@ -196,9 +196,23 @@ export default function selfCompact(pi: ExtensionAPI) {
 		const softFlag = flag("compact-soft-at");
 		const atFlag = flag("compact-at");
 		const bufferFlag = flag("compact-buffer");
-		R.specs = { softAt: softFlag ?? DEFAULT_SPECS.softAt, at: atFlag ?? DEFAULT_SPECS.at, buffer: bufferFlag ?? DEFAULT_SPECS.buffer };
-		R.sources = { softAt: softFlag ? "flag" : "default", at: atFlag ? "flag" : "default", buffer: bufferFlag ? "flag" : "default" };
-		R.fromDefaults = !softFlag && !atFlag && !bufferFlag;
+		// Settings hold numbers, the specs are strings, and the flags are strings: one
+		// parser and one validation path for all three sources.
+		const fromSettings = (tokens: number | undefined): string | undefined => (tokens === undefined ? undefined : String(tokens));
+		const softSetting = fromSettings(R.settings.softTokens);
+		const atSetting = fromSettings(R.settings.warnTokens);
+		const bufferSetting = fromSettings(R.settings.bufferTokens);
+		const source = (flagValue: string | undefined, settingValue: string | undefined): SpecSource =>
+			flagValue ? "flag" : settingValue ? "settings" : "default";
+		R.specs = {
+			softAt: softFlag ?? softSetting ?? DEFAULT_SPECS.softAt,
+			at: atFlag ?? atSetting ?? DEFAULT_SPECS.at,
+			buffer: bufferFlag ?? bufferSetting ?? DEFAULT_SPECS.buffer,
+		};
+		R.sources = { softAt: source(softFlag, softSetting), at: source(atFlag, atSetting), buffer: source(bufferFlag, bufferSetting) };
+		// Only the shipped defaults may be clamped to fit a small window; anything asked
+		// for by a flag or a setting is rejected instead of silently moved.
+		R.fromDefaults = R.sources.softAt === "default" && R.sources.at === "default" && R.sources.buffer === "default";
 		R.compactPromptFlag = flag("compact-prompt");
 		R.configError = undefined;
 		try {

@@ -32,7 +32,7 @@ function writeSpy(cwd) {
   return path;
 }
 
-async function host(t, { settings, flags = {}, tokens = 0 } = {}) {
+async function host(t, { settings, flags, tokens = 0 } = {}) {
   const cwd = mkdtempSync(join(tmpdir(), 'self-compact-footer-'));
   mkdirSync(join(cwd, '.pi'), { recursive: true });
   if (settings) writeFileSync(join(cwd, '.pi', 'settings.json'), JSON.stringify(settings));
@@ -46,7 +46,11 @@ async function host(t, { settings, flags = {}, tokens = 0 } = {}) {
   const entries = [];
   const statuses = [];
   let footerInstalled = false;
-  for (const [key, value] of Object.entries({ 'compact-soft-at': '20%', 'compact-at': '50%', 'compact-buffer': '10%', ...flags })) {
+  // Exactly the flags given, so a test can reach the settings route with no flag
+  // at all — the case a Pi launched from a package is in, since packages cannot
+  // pass flags.
+  const flagValues = flags ?? {};
+  for (const [key, value] of Object.entries(flagValues)) {
     loaded.runtime.flagValues.set(key, value);
   }
   loaded.runtime.appendEntry = (customType, data) => entries.push({ type: 'custom', customType, data });
@@ -131,4 +135,52 @@ test('F5: the feed still publishes with the footer on, so a consumer can always 
   const h = await host(t, { flags: { 'compact-at': '120k', 'compact-buffer': '40k' }, tokens: 1000 });
   assert.equal(h.footer(), true);
   assert.ok(h.feeds.length > 0);
+});
+
+test('F6: settings alone set the thresholds in tokens, with no flags to pass', async t => {
+  const h = await host(t, {
+    settings: { selfCompact: { footer: false, softTokens: 60000, warnTokens: 120000, bufferTokens: 40000 } },
+    tokens: 130000,
+  });
+  const feed = h.feeds.at(-1);
+  assert.equal(feed.softTokens, 60000);
+  assert.equal(feed.warnTokens, 120000);
+  assert.equal(feed.forcedTokens, 160000);
+  // 160k of 200k is the level this session is actually in.
+  assert.equal(feed.level, 'warning');
+  assert.equal(feed.phase, 'WARNING');
+  assert.equal(h.footer(), false);
+});
+
+test('F7: a flag overrides the setting for its own key and leaves the others', async t => {
+  const h = await host(t, {
+    settings: { selfCompact: { softTokens: 60000, warnTokens: 120000, bufferTokens: 40000 } },
+    // A zero buffer is the documented "block the moment the warning line is hit".
+    flags: { 'compact-buffer': '0' },
+    tokens: 130000,
+  });
+  const feed = h.feeds.at(-1);
+  // soft and warn still come from settings; only the buffer was overridden.
+  assert.equal(feed.softTokens, 60000);
+  assert.equal(feed.warnTokens, 120000);
+  assert.equal(feed.forcedTokens, 120000);
+});
+
+test('F8: a threshold asked for by a setting is rejected, not clamped, when it cannot fit', async t => {
+  // 500k of a 200k window. Only the shipped defaults may be moved silently.
+  const h = await host(t, { settings: { selfCompact: { warnTokens: 500000 } }, tokens: 130000 });
+  const feed = h.feeds.at(-1);
+  assert.equal(feed.forcedTokens, null);
+  assert.equal(feed.phase, 'REJECTED');
+});
+
+test('F9: a mistyped setting falls back to the default rather than breaking the session', async t => {
+  // "60k" is flag syntax; settings take a plain number.
+  const h = await host(t, { settings: { selfCompact: { softTokens: '60k', warnTokens: '120k' } }, tokens: 130000 });
+  const feed = h.feeds.at(-1);
+  assert.ok(feed, 'the extension still resolves and publishes');
+  // The shipped defaults on a 200k window: 10%, 20% and a 10% buffer.
+  assert.equal(feed.softTokens, 20000);
+  assert.equal(feed.warnTokens, 40000);
+  assert.equal(feed.forcedTokens, 60000);
 });

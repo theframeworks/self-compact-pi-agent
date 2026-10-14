@@ -111,7 +111,14 @@ project's `.pi/settings.json`) to leave the footer to one that draws these
 numbers itself:
 
 ```json
-{ "selfCompact": { "footer": false } }
+{
+  "selfCompact": {
+    "footer": false,
+    "softTokens": 60000,
+    "warnTokens": 120000,
+    "bufferTokens": 40000
+  }
+}
 ```
 
 The extension then stops calling `setFooter` but still publishes everything it
@@ -127,13 +134,32 @@ knows, so nothing is lost:
 [pi-statusline](https://github.com/sergio-agosti/pi-statusline) consumes the
 feed: it draws the hard cutoff as a tick on its own context bar and the phase as
 a tag beside it, and drops the raw status string so the reading is not printed
-twice. Thresholds are set in tokens there, which is also what makes a
-model-agnostic cutoff possible:
+twice.
+
+The thresholds are **token counts, not percentages**, in settings and on the
+command line alike. A percentage moves with the model — 20% is 20k tokens of a
+100k window and 200k tokens of a 1m one — so the same number means a different
+amount of room on every model, and the cutoff that matters (where the session
+still has room to write a usable note) cannot be reasoned about across a model
+switch. In tokens, the three lines above read: notice at 60k, warning at 120k,
+and a hard cutoff at 160k. `warnTokens + bufferTokens` is the cutoff, exactly as
+`--compact-buffer` extends `--compact-at`.
+
+Settings exist because a Pi launched from an installed package cannot be given
+flags. Use them for a package install, and a flag to override one value at
+launch without editing the file:
 
 ```bash
 pi -e extensions/self-compact/self-compact.ts \
    --compact-soft-at 60k --compact-at 120k --compact-buffer 40k
 ```
+
+A flag wins over a setting, a setting over the shipped default, and a project
+`.pi/settings.json` over the global one — per key, so overriding the buffer
+leaves the other two alone. `/self-compact-info` prints each resolved value and
+where it came from. A setting that is not a whole token count is ignored rather
+than fatal: a typo falls back instead of leaving the session unable to resolve a
+threshold, and the fallback is visible in that same command.
 
 The footer is on by default, so `just run`, `just demo` and the tests behave
 exactly as before.

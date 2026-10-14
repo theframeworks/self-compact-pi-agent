@@ -24,6 +24,21 @@ export interface SelfCompactSettings {
 	 * same numbers as a structured feed for a footer that draws them.
 	 */
 	footer: boolean;
+	/**
+	 * Thresholds in tokens: the same three knobs as the flags, for a Pi launched
+	 * through an installed package where no flags can be passed. The flags win
+	 * when both are given, so a launch can override a settings file without
+	 * editing it. Unset means the flag, else the shipped default.
+	 *
+	 * Tokens rather than percentages, because a percentage moves with the model:
+	 * 20% is 20k tokens of a 100k window and 200k tokens of a 1m one, so the same
+	 * number cannot be reasoned about across a model switch. `warnTokens +
+	 * bufferTokens` is the hard cutoff, exactly as `--compact-buffer` extends
+	 * `--compact-at`.
+	 */
+	softTokens?: number;
+	warnTokens?: number;
+	bufferTokens?: number;
 }
 
 export const DEFAULT_SETTINGS: SelfCompactSettings = { footer: true };
@@ -47,6 +62,20 @@ function objectValue(source: Record<string, unknown> | undefined, key: string): 
 		: undefined;
 }
 
+/**
+ * A threshold from settings.
+ *
+ * Only a whole, non-negative number: the `60k` shorthand belongs to the flags,
+ * and a percentage would put back the model-relative scale that token
+ * thresholds exist to avoid. Anything else is ignored rather than rejected, so
+ * a typo falls back to the flag or to the shipped default instead of leaving a
+ * session unable to resolve a threshold at all; `/self-compact-info` prints the
+ * resolved value and where it came from, so the fallback is visible there.
+ */
+function tokenValue(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
 /** Global then project: a project value wins over the global one. */
 export function readSettings(globalPath: string, projectPath: string): SelfCompactSettings {
 	const merged = {
@@ -54,5 +83,10 @@ export function readSettings(globalPath: string, projectPath: string): SelfCompa
 		...objectValue(readObject(projectPath), SETTINGS_KEY),
 	};
 	const footer = merged.footer;
-	return { footer: typeof footer === "boolean" ? footer : DEFAULT_SETTINGS.footer };
+	return {
+		footer: typeof footer === "boolean" ? footer : DEFAULT_SETTINGS.footer,
+		softTokens: tokenValue(merged.softTokens),
+		warnTokens: tokenValue(merged.warnTokens),
+		bufferTokens: tokenValue(merged.bufferTokens),
+	};
 }

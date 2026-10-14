@@ -8,9 +8,12 @@
 # scripted agent walking up to a threshold: under pi 1.2.0 the scripted run
 # stalls after its first turn (upstream's own scripts/tui-smoke.sh fails the same
 # way), so the real-token config only ever reaches the idle state.
-#   SOFT/AT/BUFFER   thresholds to launch with
-#   OUT              capture path
-#   EXPECT_TAG       1 when the thresholds should be crossed at ~1.1k tokens
+#   SOFT/AT/BUFFER         thresholds to pass as flags
+#   SETTINGS_ONLY=1        pass no threshold flags and take them from
+#                          .pi/settings.json instead, which is the only route a Pi
+#                          launched from an installed package has
+#   OUT                    capture path
+#   EXPECT_TAG             1 when the thresholds should be crossed at ~1.1k tokens
 set -u
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
@@ -18,12 +21,25 @@ STATUSLINE="${STATUSLINE:-$HOME/Developer/pi-statusline/src/index.ts}"
 SOFT="${SOFT:-60k}"
 AT="${AT:-120k}"
 BUFFER="${BUFFER:-40k}"
+SETTINGS_ONLY="${SETTINGS_ONLY:-0}"
+SOFT_TOKENS="${SOFT_TOKENS:-100}"
+WARN_TOKENS="${WARN_TOKENS:-500}"
+BUFFER_TOKENS="${BUFFER_TOKENS:-500}"
 EXPECT_TAG="${EXPECT_TAG:-0}"
 OUT="${OUT:-$ROOT/verification/tui-statusline.txt}"
 DIR="$ROOT/verification/tmp/tui-statusline"
 rm -rf "$DIR"; mkdir -p "$DIR/.pi" "$DIR/sessions"
 # footer:false is the integration switch under test: the footer is pi-statusline's.
-echo '{"compaction":{"enabled":true,"reserveTokens":16384,"keepRecentTokens":1500},"selfCompact":{"footer":false}}' > "$DIR/.pi/settings.json"
+if [ "$SETTINGS_ONLY" = "1" ]; then
+  FLAGS=""
+  SELF_COMPACT="{$(printf '%s' "\"footer\":false,\"softTokens\":$SOFT_TOKENS,\"warnTokens\":$WARN_TOKENS,\"bufferTokens\":$BUFFER_TOKENS")}"
+  HEADING="thresholds from .pi/settings.json: notice $SOFT_TOKENS, warning $WARN_TOKENS, +$BUFFER_TOKENS buffer, no flags"
+else
+  FLAGS="--compact-soft-at $SOFT --compact-at $AT --compact-buffer $BUFFER"
+  SELF_COMPACT='{"footer":false}'
+  HEADING="thresholds from flags: notice $SOFT, warning $AT, buffer $BUFFER"
+fi
+echo "{\"compaction\":{\"enabled\":true,\"reserveTokens\":16384,\"keepRecentTokens\":1500},\"selfCompact\":$SELF_COMPACT}" > "$DIR/.pi/settings.json"
 SESSION="sc-sl-$$"
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 # Lands at 220k, which is still above self_compact's own placeholder threshold.
@@ -31,10 +47,10 @@ tmux new-session -d -s "$SESSION" -x 160 -y 42 -c "$DIR" \
   "env PI_SKIP_VERSION_CHECK=1 PI_OFFLINE=1 SC_FAKE_WINDOW=200000 SC_FAKE_BASE=5000 SC_FAKE_STEP=20000 SC_FAKE_SCENARIO=ignore-until-forced SC_FAKE_TRACE=$DIR/trace.jsonl \
    pi --no-extensions --no-skills --no-prompt-templates --no-context-files -a --no-session \
       -e $ROOT/extensions/self-compact/self-compact.ts -e $ROOT/tests/harness/fake-provider.ts -e $STATUSLINE \
-      --model fake/scripted --compact-soft-at $SOFT --compact-at $AT --compact-buffer $BUFFER; sleep 5"
+      --model fake/scripted $FLAGS; sleep 5"
 sleep 6
 {
-  echo "### startup footer (thresholds: notice $SOFT, warning $AT, buffer $BUFFER)"
+  echo "### startup footer ($HEADING)"
   tmux capture-pane -t "$SESSION" -p | tail -8
 } > "$OUT"
 tmux send-keys -t "$SESSION" "Start the scripted work." Enter
