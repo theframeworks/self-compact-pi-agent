@@ -72,7 +72,12 @@ check "pi-statusline draws a 16-cell bar with a cutoff tick" "grep -qE '[━─�
 check "the cutoff tick appears" "grep -qE '[━─]·|·[━─]' '$OUT'"
 check "self-compact's own 20-cell bar is absent" "! grep -qE '\[[#=~!|-]{20}\]' '$OUT'"
 if [ "$EXPECT_TAG" = "1" ]; then
-  check "the phase tag is rendered after the threshold is crossed" "grep -qE 'NOTICE|WARNING|FORCED|COMPACTING|COMPACTED' '$OUT'"
+  # The phase tag is a glyph, not a word: info circle (notice), triangle (warning),
+  # lock (forced), spinner (compacting), check (compacted). Built from octal escapes
+  # rather than $'\uXXXX' (needs bash 4.2, macOS ships 3.2) or raw codepoints, which
+  # are unreadable in the file and easy to write as the wrong plane.
+  phase_glyphs=$(printf '\357\201\232|\357\201\261|\357\200\243|\357\204\220|\357\200\214')
+  check "the phase tag is rendered after the threshold is crossed" "grep -qE '$phase_glyphs' '$OUT'"
   check "the tools-locked reason reaches the transcript" "grep -qE 'self_compact' '$OUT'"
 fi
 exit $status
