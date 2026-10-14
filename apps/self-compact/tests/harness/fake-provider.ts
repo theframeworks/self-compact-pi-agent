@@ -22,7 +22,7 @@
 import { appendFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import type { AssistantMessage, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Context, JsonObject, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 
 const env = (key: string, fallback: string) => process.env[key] ?? fallback;
 const WINDOW = Number(env("SC_FAKE_WINDOW", "100000"));
@@ -246,7 +246,7 @@ function streamScripted(model: Model<any>, context: Context, options?: SimpleStr
 				}
 				const emitCall = (name: string, args: Record<string, unknown>) => {
 					const id = `call_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
-					const toolCall = { type: "toolCall" as const, id, name, arguments: args };
+					const toolCall = { type: "toolCall" as const, id, name, arguments: args as JsonObject };
 					output.content.push(toolCall);
 					stream.push({ type: "toolcall_start", contentIndex: index, partial: output });
 					stream.push({ type: "toolcall_delta", contentIndex: index, delta: JSON.stringify(args), partial: output });
