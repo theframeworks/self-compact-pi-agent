@@ -18,6 +18,7 @@ function write(path: string, body: string) {
 /** Nothing was asked for: the footer is on and every threshold is unset, so each falls back to its flag or default. */
 function assertDefaults(settings: SelfCompactSettings) {
 	assert.equal(settings.footer, DEFAULT_SETTINGS.footer);
+	assert.equal(settings.lockTools, DEFAULT_SETTINGS.lockTools);
 	assert.equal(settings.softTokens, undefined);
 	assert.equal(settings.warnTokens, undefined);
 	assert.equal(settings.bufferTokens, undefined);
@@ -63,6 +64,19 @@ test("malformed JSON, a JSON array and an unrelated key are all ignored", (t) =>
 
 test("the footer default is on, so upstream behaviour is unchanged", () => {
 	assert.equal(DEFAULT_SETTINGS.footer, true);
+});
+
+test("lockTools false stops the hard cutoff from blocking tools", (t) => {
+	const { global, project } = paths(t);
+	write(global, settingsFile({ selfCompact: { lockTools: false } }));
+	assert.equal(readSettings(global, project).lockTools, false);
+});
+
+test("a lockTools that is not a boolean leaves the lock on", (t) => {
+	const { global, project } = paths(t);
+	write(global, settingsFile({ selfCompact: { lockTools: "no" } }));
+	assert.equal(readSettings(global, project).lockTools, true);
+	assert.equal(DEFAULT_SETTINGS.lockTools, true, "the lock is on unless it is turned off on purpose");
 });
 
 test("token thresholds are read as plain token counts", (t) => {

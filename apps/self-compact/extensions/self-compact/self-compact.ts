@@ -234,7 +234,8 @@ export default function selfCompact(pi: ExtensionAPI) {
 		const h = R.state.handoff;
 		return h && h.status !== "done" ? h : undefined;
 	};
-	const locked = (): boolean => R.state.locked;
+	/** The tool block is the one behaviour a failing summarizer can turn into a dead end, so it is switchable. */
+	const locked = (): boolean => R.state.locked && R.settings.lockTools;
 
 	// ---------------------------------------------------------------- helpers
 

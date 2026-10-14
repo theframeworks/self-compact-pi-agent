@@ -25,6 +25,18 @@ export interface SelfCompactSettings {
 	 */
 	footer: boolean;
 	/**
+	 * Block every tool except self_compact at the hard cutoff.
+	 *
+	 * On by default, and the only setting here that can strand a session. It is safe
+	 * only while summary generation can be trusted to finish: at the cutoff with the
+	 * lock on and the summarizer failing, the retry cannot succeed, so every other
+	 * tool stays blocked and nothing reaches the point where the lock is released.
+	 * Turn it off when running a Pi version whose summary input this extension has
+	 * not been checked against. The thresholds, the phase tag and the guidance
+	 * messages keep working; they just stop being enforced.
+	 */
+	lockTools: boolean;
+	/**
 	 * Thresholds in tokens: the same three knobs as the flags, for a Pi launched
 	 * through an installed package where no flags can be passed. The flags win
 	 * when both are given, so a launch can override a settings file without
@@ -41,7 +53,7 @@ export interface SelfCompactSettings {
 	bufferTokens?: number;
 }
 
-export const DEFAULT_SETTINGS: SelfCompactSettings = { footer: true };
+export const DEFAULT_SETTINGS: SelfCompactSettings = { footer: true, lockTools: true };
 
 function readObject(path: string): Record<string, unknown> | undefined {
 	try {
@@ -83,8 +95,10 @@ export function readSettings(globalPath: string, projectPath: string): SelfCompa
 		...objectValue(readObject(projectPath), SETTINGS_KEY),
 	};
 	const footer = merged.footer;
+	const lockTools = merged.lockTools;
 	return {
 		footer: typeof footer === "boolean" ? footer : DEFAULT_SETTINGS.footer,
+		lockTools: typeof lockTools === "boolean" ? lockTools : DEFAULT_SETTINGS.lockTools,
 		softTokens: tokenValue(merged.softTokens),
 		warnTokens: tokenValue(merged.warnTokens),
 		bufferTokens: tokenValue(merged.bufferTokens),
