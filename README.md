@@ -114,8 +114,8 @@ numbers itself:
 {
   "selfCompact": {
     "footer": false,
-    "softTokens": 60000,
-    "warnTokens": 120000,
+    "softTokens": 160000,
+    "warnTokens": 200000,
     "bufferTokens": 40000
   }
 }
@@ -141,9 +141,16 @@ command line alike. A percentage moves with the model — 20% is 20k tokens of a
 100k window and 200k tokens of a 1m one — so the same number means a different
 amount of room on every model, and the cutoff that matters (where the session
 still has room to write a usable note) cannot be reasoned about across a model
-switch. In tokens, the three lines above read: notice at 60k, warning at 120k,
-and a hard cutoff at 160k. `warnTokens + bufferTokens` is the cutoff, exactly as
+switch. In tokens, the three lines above read: notice at 160k, warning at 200k,
+and a hard cutoff at 240k. `warnTokens + bufferTokens` is the cutoff, exactly as
 `--compact-buffer` extends `--compact-at`.
+
+Those particular numbers are argued rather than picked: [Compaction Thresholds](docs/compaction-thresholds.md)
+collects the sources, including the finding that degradation onset tracks an
+absolute token count rather than a fraction of the window — which is the reason
+these settings are in tokens at all — and the measurement that the verbatim tail
+pi keeps across a compaction (`keepRecentTokens`) matters more than the threshold
+does.
 
 Settings exist because a Pi launched from an installed package cannot be given
 flags. Use them for a package install, and a flag to override one value at
