@@ -102,6 +102,42 @@ The guidance never enters the model's persisted context: it is injected into the
 
 Twenty cells at 5 % each. `#` cached, `=` not cached, `-` free. `~` soft, `!` warning, `|` hard cutoff. The phase tag turns yellow, orange, and red. While a note is saved and the compaction runs it reads `COMPACTING`, then `COMPACTED` until the note is back. At `FORCED` every tool except `self_compact` is blocked. `/self-compact-info` prints the same numbers in full without spending a model turn.
 
+### Sharing the footer with pi-statusline
+
+Pi has a single custom-footer slot, and `ctx.ui.setFooter()` disposes whatever
+was there, so two extensions that both want the footer get last-writer-wins by
+load order. Set `selfCompact.footer` to `false` in Pi's settings (global, or the
+project's `.pi/settings.json`) to leave the footer to one that draws these
+numbers itself:
+
+```json
+{ "selfCompact": { "footer": false } }
+```
+
+The extension then stops calling `setFooter` but still publishes everything it
+knows, so nothing is lost:
+
+- `ctx.ui.setStatus("self-compact", …)` in TUI mode too, which Pi's built-in
+  footer draws. This is the fallback readout when no other footer is installed.
+- `pi.events.emit("self-compact:updated", …)`, the numbers a footer cannot read
+  for itself: `contextWindow`, `tokens`, the three thresholds **as token
+  counts**, `level`, and `phase`. Tokens, not percentages, because token values
+  are what the flags take and what a bar draws.
+
+[pi-statusline](https://github.com/sergio-agosti/pi-statusline) consumes the
+feed: it draws the hard cutoff as a tick on its own context bar and the phase as
+a tag beside it, and drops the raw status string so the reading is not printed
+twice. Thresholds are set in tokens there, which is also what makes a
+model-agnostic cutoff possible:
+
+```bash
+pi -e extensions/self-compact/self-compact.ts \
+   --compact-soft-at 60k --compact-at 120k --compact-buffer 40k
+```
+
+The footer is on by default, so `just run`, `just demo` and the tests behave
+exactly as before.
+
 ---
 
 ## Folder structure

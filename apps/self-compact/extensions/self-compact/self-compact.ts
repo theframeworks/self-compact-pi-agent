@@ -17,19 +17,24 @@
  *   returned verbatim as a handoff message (shown in full) that starts the next turn. When Pi would find nothing to
  *   compact (the session fits inside keepRecentTokens) the tool refuses instead of saving a note and locking.
  * - Failure or cancellation keeps the note and the lock; retries, /self-compact-now, reload and /tree recovery.
- * - One-line replacement footer: model id on the left, the 20-cell context bar and phase on the right.
+ * - One-line replacement footer: model id on the left, the 20-cell context bar and phase on the right. Set
+ *   `selfCompact.footer: false` in Pi settings to leave the footer to another extension (Pi has a single custom-footer
+ *   slot, so two of them is last-writer-wins): the status line and the feed below still publish.
+ * - `pi.events` feed `self-compact:updated` carries the resolved thresholds and live usage as token counts, so a
+ *   footer extension can draw them instead of parsing the status string.
  *
  * Merged from the claude-fable-5-1 and gpt-6-astra implementations (see specs/self-compact-merge.html).
  */
 import { randomUUID } from "node:crypto";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { generateSummary, hasCompactionMaterial, keepRecentTokens } from "./summary.ts";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { formatPct, formatTokens, renderContextBar } from "./context-bar.ts";
+import { DEFAULT_SETTINGS, readSettings, type SelfCompactSettings } from "./settings.ts";
 import {
 	FORCED_PROMPT,
 	BUILTIN_PROMPTS,
@@ -72,6 +77,22 @@ const MAX_AUTO_RETRIES = 3;
 const SUMMARY_ATTEMPTS = 2;
 const GUIDANCE_TYPE = "self-compact-guidance";
 
+/**
+ * The status key this extension publishes with `ctx.ui.setStatus()`, and the
+ * key a structured feed names so a footer can drop the raw string it draws.
+ */
+export const STATUS_KEY = "self-compact";
+/**
+ * Feed channel for the resolved thresholds and live usage, in token counts.
+ *
+ * Carries tokens rather than percentages: token thresholds are what the
+ * operator sets (`--compact-at 200k`) and what a bar draws, so nothing has to
+ * round-trip through a percentage. `contextWindow` is included so a consumer
+ * can reject a payload left over from a previous model, exactly as the
+ * `context-tokens:updated` feed does.
+ */
+export const FEED_EVENT = "self-compact:updated";
+
 /** Static system-prompt line: never changes between calls so the prompt-cache prefix stays stable. */
 const SYSTEM_PROMPT_LINE = `\n\nself-compact: when context usage crosses a threshold you receive a transient [self-compact · …] message with live numbers. You cannot see your own context usage otherwise: call view_context (no arguments) whenever you need the current numbers as JSON, for example after a compaction or before deciding to compact; do not poll it every turn. After a compaction, your own saved note_to_self is returned to you verbatim as the next message (exactly the note text, nothing else); resume its NEXT ACTION without another user message and never restart work the note marks as done. If no work remains, report completion and stop.`;
 
@@ -86,6 +107,7 @@ interface Runtime {
 	specs: ThresholdSpecs;
 	sources: { softAt: SpecSource; at: SpecSource; buffer: SpecSource };
 	fromDefaults: boolean;
+	settings: SelfCompactSettings;
 	compactPromptFlag?: string;
 	configError?: string;
 	resolveError?: string;
@@ -150,6 +172,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		specs: { ...DEFAULT_SPECS },
 		sources: { softAt: "default", at: "default", buffer: "default" },
 		fromDefaults: true,
+		settings: DEFAULT_SETTINGS,
 		searchDirs: promptSearchDirs(process.cwd(), EXTENSION_DIR),
 		usage: { tokens: null, percent: null, cachedTokens: 0, window: 0 },
 		level: "unknown",
@@ -168,7 +191,8 @@ export default function selfCompact(pi: ExtensionAPI) {
 	};
 
 	/** CLI flag values are applied after extensions load, so settings are read at session start. */
-	function loadSettings() {
+	function loadSettings(cwd: string) {
+		R.settings = readSettings(join(getAgentDir(), "settings.json"), join(cwd, ".pi", "settings.json"));
 		const softFlag = flag("compact-soft-at");
 		const atFlag = flag("compact-at");
 		const bufferFlag = flag("compact-buffer");
@@ -300,11 +324,38 @@ export default function selfCompact(pi: ExtensionAPI) {
 		return levelTag(R.level);
 	}
 
+	/**
+	 * Publish the numbers a footer extension cannot read for itself.
+	 *
+	 * `level` and `phase` mirror the footer tag; the thresholds are null while
+	 * the settings are rejected, so a consumer draws no marks rather than marks
+	 * in the wrong place.
+	 */
+	function publishFeed() {
+		const t = R.thresholds;
+		pi.events.emit(FEED_EVENT, {
+			statusKey: STATUS_KEY,
+			contextWindow: R.usage.window,
+			tokens: R.usage.tokens,
+			softTokens: t?.softTokens ?? null,
+			warnTokens: t?.warnTokens ?? null,
+			forcedTokens: t?.forcedTokens ?? null,
+			level: R.level,
+			phase: statusTag(),
+			cycle: R.state.cycle,
+		});
+	}
+
 	function refreshUi(ctx: ExtensionContext) {
 		R.usage = snapshotUsage(ctx);
 		R.level = R.thresholds ? levelFor(R.usage.tokens, R.thresholds) : "unknown";
+		// With the footer off, the status line is the only readout Pi itself can draw, so publish
+		// it in TUI mode too. A footer that renders the feed supersedes the key and drops the text.
+		if (ctx.hasUI && (ctx.mode !== "tui" || !R.settings.footer)) {
+			ctx.ui.setStatus(STATUS_KEY, [contextBarText(), statusTag()].filter(Boolean).join(" "));
+		}
 		if (ctx.mode === "tui") R.requestRender?.();
-		else if (ctx.hasUI) ctx.ui.setStatus("self-compact", [contextBarText(), statusTag()].filter(Boolean).join(" "));
+		publishFeed();
 	}
 
 	/**
@@ -630,7 +681,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 	});
 
 	function installFooter(ctx: ExtensionContext) {
-		if (ctx.mode !== "tui") return;
+		if (ctx.mode !== "tui" || !R.settings.footer) return;
 		ctx.ui.setFooter((tui, theme) => {
 			R.requestRender = () => tui.requestRender();
 			return {
@@ -681,7 +732,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		R.promptErrors.clear();
 		R.compactionInFlight = false;
 		R.searchDirs = promptSearchDirs(ctx.cwd, EXTENSION_DIR);
-		loadSettings();
+		loadSettings(ctx.cwd);
 		resolve(ctx);
 		const problem = inert();
 		if (problem) notify(ctx, `self-compact REJECTED settings: ${problem}. Every tool is blocked until the flags are fixed.`, "error");
