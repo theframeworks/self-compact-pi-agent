@@ -11,6 +11,10 @@ import { pathToFileURL } from 'node:url';
 // override scripts/typecheck.sh understands.
 const piDir = process.env.PI_DIR
   ?? join(execFileSync('npm', ['root', '-g'], { encoding: 'utf8' }).trim(), '@earendil-works/pi-coding-agent');
+// The extension reads selfCompact settings from the agent dir as well as the project.
+// Point the agent dir at an empty temp path so a developer's ~/.pi/agent/settings.json
+// cannot decide what these assertions see.
+process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'self-compact-agent-'));
 const { loadExtensions } = await import(pathToFileURL(join(piDir, 'dist/core/extensions/loader.js')));
 const entry = resolve('extensions/self-compact/self-compact.ts');
 

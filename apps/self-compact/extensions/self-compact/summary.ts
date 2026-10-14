@@ -57,6 +57,20 @@ function historyInput(messages: SessionBeforeCompactEvent["preparation"]["messag
 	return `<conversation>\n${conversation}\n</conversation>\n\n${previous ? `<previous-summary>\n${previous}\n</previous-summary>\n\n` : ""}`;
 }
 
+/**
+ * The block Pi wraps the turn prefix of a split turn in.
+ *
+ * Pi 1.2 changed this one from the `<conversation>` tags the history uses to a
+ * `# Conversation` heading, adding its own `# Instructions` after it. Matching
+ * only the history shape meant a split turn could never be replaced, and a split
+ * turn is exactly when a long user message has to be summarized — so compaction
+ * failed whenever it mattered most. The candidate ends at the serialized
+ * conversation, leaving Pi's `# Instructions` block in place.
+ */
+function turnPrefixInput(messages: SessionBeforeCompactEvent["preparation"]["messagesToSummarize"]): string {
+	return `# Conversation\n${serializeConversation(convertToLlm(messages))}`;
+}
+
 function summaryInstructions(event: SessionBeforeCompactEvent, prompt: LoadedPrompt): string {
 	return [
 		"Summarize the supplied historical data. Do not continue the task, simulate tools, or claim actions without tool-result evidence. Keep pending actions pending.",
@@ -77,7 +91,11 @@ function replaceInstructions(context: Context, inputs: string[], instructions: s
 			content: content.map(block => {
 				if (block.type !== "text") return block;
 				let input = inputs.find(candidate => block.text.startsWith(candidate));
-				if (input === undefined) throw new Error("Unrecognized Pi summary input; cannot replace instructions safely.");
+				// Name what was seen: an unmatched block means Pi changed the shape of its
+				// summary input, and the preview is what identifies which shape it is now.
+				if (input === undefined) {
+					throw new Error(`Unrecognized Pi summary input; cannot replace instructions safely. Block starts with: ${JSON.stringify(block.text.slice(0, 120))}`);
+				}
 				if (input.length > budgetChars) {
 					input = `[earlier conversation truncated to fit summary budget]\n${input.slice(-budgetChars)}`;
 					truncated = true;
@@ -92,7 +110,14 @@ function replaceInstructions(context: Context, inputs: string[], instructions: s
 /** Pi owns split turns, summary updates, file tracking and configured transport retries. */
 export async function generateSummary(event: SessionBeforeCompactEvent, ctx: ExtensionContext, system: LoadedPrompt, instructions: LoadedPrompt) {
 	if (!ctx.model) throw new Error("No model available for compaction.");
-	const inputs = [historyInput(event.preparation.messagesToSummarize, event.preparation.previousSummary), historyInput(event.preparation.turnPrefixMessages)].sort((a, b) => b.length - a.length);
+	// Longest first, so the history candidate carrying a previous summary wins over the
+	// one without it when both could match the same block. The turn-prefix candidate is
+	// separate because Pi wraps that block differently from the history.
+	const inputs = [
+		historyInput(event.preparation.messagesToSummarize, event.preparation.previousSummary),
+		historyInput(event.preparation.turnPrefixMessages),
+		turnPrefixInput(event.preparation.turnPrefixMessages),
+	].sort((a, b) => b.length - a.length);
 	const userInstructions = summaryInstructions(event, instructions);
 	let truncatedInput = false;
 	const result = await compact(

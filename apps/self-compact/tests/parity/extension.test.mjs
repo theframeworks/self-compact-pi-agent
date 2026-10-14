@@ -9,6 +9,11 @@ import { pathToFileURL } from 'node:url';
 const globalModules = process.env.PI_DIR
   ? resolve(process.env.PI_DIR, '..', '..')
   : execFileSync('npm', ['root', '-g'], { encoding: 'utf8' }).trim();
+// The extension reads selfCompact settings from the agent dir as well as the project, and
+// Pi reads compaction settings from both. Point the agent dir at an empty temp path so the
+// assertions describe the extension and this branch, not whatever ~/.pi/agent/settings.json
+// the machine running the suite happens to have.
+process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'self-compact-agent-'));
 const { loadExtensions } = await import(pathToFileURL(join(globalModules, '@earendil-works/pi-coding-agent/dist/core/extensions/loader.js')));
 const entry = resolve('extensions/self-compact/self-compact.ts');
 
