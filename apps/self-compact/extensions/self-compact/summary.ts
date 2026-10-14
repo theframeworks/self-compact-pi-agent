@@ -127,7 +127,13 @@ export async function generateSummary(event: SessionBeforeCompactEvent, ctx: Ext
 			const budgetChars = Math.max(8000, (model.contextWindow - maxTokens - 2000) * 4 - system.text.length - userInstructions.length);
 			const { messages, truncated } = replaceInstructions(context, inputs, userInstructions, budgetChars);
 			truncatedInput ||= truncated;
-			const response = await ctx.modelRegistry.complete(model, { ...context, systemPrompt: system.text, messages }, {
+			// Pi 1.2 folds its own system prompt into the message list as messages[0] before it
+			// calls us, and replaceInstructions leaves non-user messages alone, so Pi's
+			// summarization prompt would ride along next to the override we were asked to use.
+			// That prompt is the one carrying the "Use this EXACT format" instructions ours
+			// exist to replace, so drop it and let systemPrompt below be the only one.
+			const requestMessages = messages[0]?.role === "system" ? messages.slice(1) : messages;
+			const response = await ctx.modelRegistry.complete(model, { ...context, systemPrompt: system.text, messages: requestMessages }, {
 				...options, maxTokens, signal: event.signal, cacheRetention: "none", sessionId: randomUUID(),
 				...(model.api === "openai-completions" && model.reasoning ? { reasoningEffort: "low" as const } : {}),
 			});
