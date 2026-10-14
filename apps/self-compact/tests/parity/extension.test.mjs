@@ -6,7 +6,9 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 
-const globalModules = execFileSync('npm', ['root', '-g'], { encoding: 'utf8' }).trim();
+const globalModules = process.env.PI_DIR
+  ? resolve(process.env.PI_DIR, '..', '..')
+  : execFileSync('npm', ['root', '-g'], { encoding: 'utf8' }).trim();
 const { loadExtensions } = await import(pathToFileURL(join(globalModules, '@earendil-works/pi-coding-agent/dist/core/extensions/loader.js')));
 const entry = resolve('extensions/self-compact/self-compact.ts');
 
