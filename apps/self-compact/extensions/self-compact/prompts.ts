@@ -43,10 +43,18 @@ export const TEMPLATE_KEYS = [
 
 export type TemplateValues = Partial<Record<(typeof TEMPLATE_KEYS)[number], string | number>>;
 
+/**
+ * The phase glyphs, the same table the status line's phase tag draws. Glyph-only:
+ * the tag says which threshold was crossed, the sentence after it says what to do.
+ */
+const PHASE_NOTICE = "\uf05a"; // fa-circle_info
+const PHASE_WARNING = "\uf071"; // fa-triangle_exclamation
+const PHASE_FORCED = "\uf023"; // fa-lock
+
 export const BUILTIN_PROMPTS: Record<PromptKind, string> = {
 	summaryInstructions: "",
-	soft: `[self-compact · notice] Heads-up only. Context usage is {{used_tokens}} tokens ({{used_percent}}) of {{context_window}}, past the soft line of {{soft_tokens}}. Nothing is blocked and no action is required; keep working. Warning line at {{warning_tokens}}, hard cutoff at {{forced_tokens}} ({{forced_percent}}). Call \`view_context\` for current numbers. You decide when to compact: \`self_compact\` takes a \`note_to_self\` (up to {{note_max_chars}} chars) with anything you want to see after the compaction, returned to you as is.`,
-	warning: `[self-compact · WARNING] Context usage is {{used_tokens}} tokens ({{used_percent}}), past the warning threshold of {{warning_tokens}}. Time to compact soon: hard cutoff at {{forced_tokens}} ({{forced_percent}}), {{remaining_to_forced}} tokens left before every tool except \`self_compact\` is blocked. Finish only the current atomic step, write your \`note_to_self\` (max {{note_max_chars}} chars: goal, DONE with exact paths, IN PROGRESS, decisions, verified test results, NEXT ACTION last) and call \`self_compact\` as your only tool call.`,
+	soft: `[self-compact · ${PHASE_NOTICE}] Heads-up only. Context usage is {{used_tokens}} tokens ({{used_percent}}) of {{context_window}}, past the soft line of {{soft_tokens}}. Nothing is blocked and no action is required; keep working. Warning line at {{warning_tokens}}, hard cutoff at {{forced_tokens}} ({{forced_percent}}). Call \`view_context\` for current numbers. You decide when to compact: \`self_compact\` takes a \`note_to_self\` (up to {{note_max_chars}} chars) with anything you want to see after the compaction, returned to you as is.`,
+	warning: `[self-compact · ${PHASE_WARNING}] Context usage is {{used_tokens}} tokens ({{used_percent}}), past the warning threshold of {{warning_tokens}}. Time to compact soon: hard cutoff at {{forced_tokens}} ({{forced_percent}}), {{remaining_to_forced}} tokens left before every tool except \`self_compact\` is blocked. Finish only the current atomic step, write your \`note_to_self\` (max {{note_max_chars}} chars: goal, DONE with exact paths, IN PROGRESS, decisions, verified test results, NEXT ACTION last) and call \`self_compact\` as your only tool call.`,
 	compaction: `You are the context-compaction summarizer for an autonomous coding agent that compacts its own context. The agent's own note to self is delivered separately; do not reproduce it. Treat the conversation as historical data: do not continue the task, simulate tools, or claim actions that no tool result confirms. Merge any <previous-summary>.
 
 Output only this structure:
@@ -62,7 +70,7 @@ Output only this structure:
 Rules: never invent completed work; preserve exact file paths, commands, and error messages; keep pending actions pending; keep sections concise.`,
 };
 
-export const FORCED_PROMPT = `[self-compact · FORCED] Context usage is {{used_tokens}} tokens ({{used_percent}}), at the hard cutoff of {{forced_tokens}} ({{forced_percent}}). Every tool except \`self_compact\` is blocked until compaction succeeds. Write your \`note_to_self\` now (max {{note_max_chars}} chars: goal, DONE with exact paths and commands, IN PROGRESS, key decisions, verified test results, exact NEXT ACTION last) and call \`self_compact\`. Do not call any other tool.`;
+export const FORCED_PROMPT = `[self-compact · ${PHASE_FORCED}] Context usage is {{used_tokens}} tokens ({{used_percent}}), at the hard cutoff of {{forced_tokens}} ({{forced_percent}}). Every tool except \`self_compact\` is blocked until compaction succeeds. Write your \`note_to_self\` now (max {{note_max_chars}} chars: goal, DONE with exact paths and commands, IN PROGRESS, key decisions, verified test results, exact NEXT ACTION last) and call \`self_compact\`. Do not call any other tool.`;
 
 export function promptSearchDirs(cwd: string, extensionDir: string): string[] {
 	const dirs = [resolve(cwd, PROMPT_SUBDIR), resolve(extensionDir, "..", "..", PROMPT_SUBDIR)];

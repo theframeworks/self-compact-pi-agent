@@ -102,6 +102,8 @@ The guidance never enters the model's persisted context: it is injected into the
 
 Twenty cells at 5 % each. `#` cached, `=` not cached, `-` free. `~` soft, `!` warning, `|` hard cutoff. The phase tag turns yellow, orange, and red. While a note is saved and the compaction runs it reads `COMPACTING`, then `COMPACTED` until the note is back. At `FORCED` every tool except `self_compact` is blocked. `/self-compact-info` prints the same numbers in full without spending a model turn.
 
+The guidance message sent at each threshold opens with a glyph rather than a word — an info circle at the notice line, a triangle at the warning line, a lock at the cutoff — the same glyphs pi-statusline draws in place of its phase tag. This footer keeps the word: the same string is what `self-compact:updated` publishes, and a footer extension parses that value rather than reading it, so it stays machine-readable in both.
+
 ### Sharing the footer with pi-statusline
 
 Pi has a single custom-footer slot, and `ctx.ui.setFooter()` disposes whatever

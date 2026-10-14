@@ -109,7 +109,7 @@ function decide(context: Context): Plan {
 	// Transient guidance arrives as a trailing user-role message; look past it for the real last message.
 	let lastIndex = messages.length - 1;
 	let guidance = "";
-	if (lastIndex >= 0 && messages[lastIndex]!.role === "user" && /^\[self-compact · (notice|WARNING|FORCED)\]/.test(textOf((messages[lastIndex] as { content?: unknown }).content))) {
+	if (lastIndex >= 0 && messages[lastIndex]!.role === "user" && /^\[self-compact · (\uf05a|\uf071|\uf023)\]/.test(textOf((messages[lastIndex] as { content?: unknown }).content))) {
 		guidance = textOf((messages[lastIndex] as { content?: unknown }).content);
 		lastIndex -= 1;
 	}
@@ -153,9 +153,9 @@ function decide(context: Context): Plan {
 
 	// Guidance-driven scenarios react to the transient message itself.
 	if (guidance) {
-		if (/self-compact · WARNING/.test(guidance) && SCENARIO === "obey-warning") return handoffPlan(noteForMode(), usageTotal);
-		if (/self-compact · notice/.test(guidance) && SCENARIO === "obey-notice") return handoffPlan(noteForMode(), usageTotal);
-		if (/self-compact · FORCED/.test(guidance) && SCENARIO === "obey-forced") return handoffPlan(noteForMode(), usageTotal);
+		if (/self-compact · \uf071/.test(guidance) && SCENARIO === "obey-warning") return handoffPlan(noteForMode(), usageTotal);
+		if (/self-compact · \uf05a/.test(guidance) && SCENARIO === "obey-notice") return handoffPlan(noteForMode(), usageTotal);
+		if (/self-compact · \uf023/.test(guidance) && SCENARIO === "obey-forced") return handoffPlan(noteForMode(), usageTotal);
 	}
 
 	// The handoff is the exact note text; other user-role text is a real prompt or /self-compact-now.

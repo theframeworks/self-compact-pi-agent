@@ -77,11 +77,11 @@ test("lifecycle: thresholds, lock, self_compact, compaction, verbatim note, cont
 		// 2. Guidance reached the model as transient messages with live values, and nothing extra was persisted.
 		const turns = trace(t.traceFile).filter((r) => r.kind === "turn");
 		const seen = (marker: RegExp) => turns.find((r) => marker.test(r.lastText ?? ""));
-		assert.ok(seen(/^\[self-compact · notice\]/), "model saw the notice guidance");
-		const warning = seen(/^\[self-compact · WARNING\]/);
+		assert.ok(seen(/^\[self-compact · \uf05a\]/), "model saw the notice guidance");
+		const warning = seen(/^\[self-compact · \uf071\]/);
 		assert.ok(warning, "model saw the warning guidance");
 		assert.match(warning!.lastText ?? "", /Hard cutoff at 120,000/, "warning carries the live forced token count");
-		assert.ok(seen(/^\[self-compact · FORCED\]/), "model saw the forced guidance");
+		assert.ok(seen(/^\[self-compact · \uf023\]/), "model saw the forced guidance");
 		const persistedRoles = eventsOfType(events, "message_end").map((e) => (e.message as { role?: string; customType?: string }).role + ":" + ((e.message as { customType?: string }).customType ?? ""));
 		assert.equal(persistedRoles.filter((r) => r.startsWith("custom:")).length, 1, "the only persisted custom message is the handoff");
 		assert.equal(persistedRoles.filter((r) => r === "user:").length, 1, "the only user message is the user's prompt");
