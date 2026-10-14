@@ -58,27 +58,50 @@ changed, change this.
 On a 1M window: notice at 16%, warning at 20%, cutoff at 24%. Every model in this
 fleet holds 1M, so none of the three is clamped by the 90%-of-window cap.
 
-## Open question: cap the effective window?
+## Capping the effective window
 
 The bar, pi's native auto-compaction, and the percentages in any older config all
 scale to `contextWindow`. Leaving it at 1M means a threshold at 240k is drawn in
 the first quarter of a bar whose remaining three quarters are unusable, and pi's
 own auto-compaction sits at 984k as a backstop that will never usefully fire.
 
-Capping the window per model (`modelOverrides` in `~/.pi/agent/models.json`)
-makes all of those agree on the range the evidence supports:
+Capping the window makes every one of those agree on the range the evidence
+supports. It is a per-model override in `~/.pi/agent/models.json`, and
+`scripts/pi-context-window.sh` in the Pi config flips it:
 
-```json
-{ "providers": { "anthropic": { "modelOverrides": {
-  "claude-opus-5-5": { "contextWindow": 320000 } } } } }
+```bash
+~/.pi/agent/scripts/pi-context-window.sh          # what is set now
+~/.pi/agent/scripts/pi-context-window.sh off      # real windows
+~/.pi/agent/scripts/pi-context-window.sh 320000   # cap at 320000
 ```
 
-That is WorkOS's recommendation and it costs nothing in capability the research
-can measure — but it does foreclose the fidelity position, which is that
-summarisation is lossy in ways invisible at the moment of loss. Practitioners in
-that camp "routinely run thresholds at 500,000 tokens and above, arrived at by
-trial and error". This repo takes no position; it is a per-model decision, and it
-is deliberately not made here.
+At 320k the three lines land at 50%, 62.5% and 75%, two dots on the bar stay
+four cells apart, and Pi's own auto-compaction becomes a backstop at 303,616
+tokens rather than a number that can never be reached.
+
+### Why this cannot be an extension setting
+
+The cap has to live in Pi's model metadata, because that is the only copy every
+reader shares: Pi core for `contextTokens > contextWindow - reserveTokens`, this
+extension for the 90% ceiling, pi-statusline for the bar's scale and percentage,
+and the `contextWindow` field of the feed — which a consumer validates against to
+drop a stale payload. Two extensions each holding their own idea of the window is
+exactly the drift that validation exists to catch.
+
+An extension cannot write it either. `registerProvider` is the only model-facing
+API and its `ProviderConfig` has no `modelOverrides`: passing `models` replaces
+the provider's entire model list, so patching one entry means redefining all of
+them. `modelOverrides` in `models.json` is declarative, per-model,
+non-destructive, and applied before any extension reads `ctx.model`.
+
+### The trade-off
+
+This is WorkOS's recommendation and it costs nothing the research can measure —
+but it does foreclose the fidelity position, which holds that summarisation is
+lossy in ways invisible at the moment of loss. Practitioners in that camp
+"routinely run thresholds at 500,000 tokens and above, arrived at by trial and
+error". Hence a switch rather than a default: the cap is on here because the
+gauge is worth reading, and it is one command to drop.
 
 ## Sources
 
