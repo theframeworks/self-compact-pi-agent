@@ -17,7 +17,7 @@ pi -e extensions/self-compact/self-compact.ts --compact-soft-at 100k --compact-a
 | `--compact-buffer` | allowance above the warning before every other tool is blocked (`0` = block at the warning) | `10%` (hard cutoff 30%) |
 | `--compact-prompt` | literal text that replaces the compaction summary system prompt | unset |
 
-Values are percentages of the model window (`20%`) or token counts (`270000`, `100k`, `1.5m`). The hard cutoff is `min(warning + buffer, 90% of the window)`. Defaults live in `extensions/self-compact/defaults.ts`. Invalid settings are rejected: `/self-compact-info` reports the error and every tool is blocked until the flags are fixed.
+Values are percentages of the model window (`20%`) or token counts (`270000`, `100k`, `1.5m`). The hard cutoff is `min(warning + buffer, 90% of the window)`. Defaults live in `extensions/self-compact/defaults.ts`. Token counts that don't fit the current model (a warning above 90% of a smaller window, say) are clamped to fit, with a note. Settings that are wrong whatever the model (bad syntax, a percentage above 90%, soft above warning in the same units) are rejected: `/self-compact-info` reports the error and every tool is blocked until they are fixed.
 
 ## Tools and commands
 

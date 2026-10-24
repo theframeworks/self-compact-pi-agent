@@ -76,18 +76,31 @@ test("hard limit is capped at 90% of the window", () => {
 	assert.ok(t.notes.some((n) => n.includes("capped")));
 });
 
-test("explicit warning above the cap is rejected", () => {
+test("an explicit warning percentage above the cap is rejected at load", () => {
 	assert.throws(() => validateSpecs({ softAt: "20%", at: "95%", buffer: "0" }), /above the 90% hard cap/);
-	const r = resolveThresholds({ softAt: "100k", at: "950k", buffer: "0" }, MILLION);
-	assert.equal(r.ok, false);
 });
 
-test("explicit soft above warning is rejected (same units at load, mixed units at resolve)", () => {
+test("explicit token settings above the cap of this window are clamped, not rejected", () => {
+	const t = resolveOk({ softAt: "100k", at: "950k", buffer: "0" }, MILLION);
+	assert.equal(t.warnTokens, 900_000);
+	assert.equal(t.forcedTokens, 900_000);
+	assert.equal(t.clamped, true);
+	assert.ok(t.notes.some((n) => /^--compact-at \(950k\) exceeds the 90% cap .* clamped to 900000/.test(n)));
+});
+
+test("fixed token settings written for a big window fit a smaller model", () => {
+	const t = resolveOk({ softAt: "160k", at: "200k", buffer: "40k" }, 200_000);
+	assert.equal(t.warnTokens, 180_000);
+	assert.equal(t.softTokens, 160_000);
+	assert.equal(t.forcedTokens, 180_000);
+});
+
+test("explicit soft above warning: rejected at load in the same units, clamped at resolve in mixed units", () => {
 	assert.throws(() => validateSpecs({ softAt: "60%", at: "50%", buffer: "0" }), /must not exceed/);
 	assert.throws(() => validateSpecs({ softAt: "300k", at: "200k", buffer: "0" }), /must not exceed/);
-	const r = resolveThresholds({ softAt: "60%", at: "500k", buffer: "0" }, MILLION);
-	assert.equal(r.ok, false);
-	if (!r.ok) assert.match(r.error, /must not exceed/);
+	const t = resolveOk({ softAt: "60%", at: "500k", buffer: "0" }, MILLION);
+	assert.equal(t.softTokens, 500_000);
+	assert.ok(t.notes.some((n) => /--compact-soft-at \(60%\) exceeds the warning threshold; clamped to 500000/.test(n)));
 });
 
 test("token defaults larger than a small window are clamped instead of rejected", () => {

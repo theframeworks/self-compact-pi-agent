@@ -97,7 +97,7 @@ export interface ResolvedThresholds {
 	softPct: number;
 	warnPct: number;
 	forcedPct: number;
-	/** True when defaults were clamped to fit a small window. */
+	/** True when the settings were clamped to fit a small window. */
 	clamped: boolean;
 	notes: string[];
 }
@@ -116,8 +116,8 @@ export function pctOf(tokens: number, window: number): number {
 /**
  * Resolve specs against a model window.
  * - forced = min(warn + buffer, cap) where cap = floor(0.9 * window)
- * - explicit settings that violate soft <= warn <= cap are rejected
- * - defaults that do not fit a small window are clamped with a note
+ * - settings that do not fit this window (warn above the cap, soft above warn) are clamped with a note;
+ *   validateSpecs() still rejects what is wrong whatever the window
  */
 export function resolveThresholds(
 	specs: ThresholdSpecs,
@@ -129,7 +129,7 @@ export function resolveThresholds(
 	}
 	let parsed: ParsedSpecs;
 	try {
-		parsed = parseSpecs(specs);
+		parsed = validateSpecs(specs);
 	} catch (error) {
 		return { ok: false, error: error instanceof Error ? error.message : String(error) };
 	}
@@ -140,31 +140,20 @@ export function resolveThresholds(
 	const notes: string[] = [];
 	let clamped = false;
 
+	// The window depends on the model, so token settings written for one model can overshoot a smaller one (a
+	// subagent on a smaller model, say). Clamp them to fit rather than reject: a rejection blocks every tool.
+	const label = options.fromDefaults ? "Default " : "";
 	if (warnTokens > capTokens) {
-		if (options.fromDefaults) {
-			notes.push(
-				`Default --compact-at (${parsed.warn.raw}) exceeds the ${HARD_CAP_FRACTION * 100}% cap of this ${contextWindow}-token window; clamped to ${capTokens}.`,
-			);
-			warnTokens = capTokens;
-			clamped = true;
-		} else {
-			return {
-				ok: false,
-				error: `Invalid --compact-at: ${parsed.warn.raw} (${warnTokens} tokens) exceeds the ${HARD_CAP_FRACTION * 100}% cap (${capTokens} tokens) of the ${contextWindow}-token window.`,
-			};
-		}
+		notes.push(
+			`${label}--compact-at (${parsed.warn.raw}) exceeds the ${HARD_CAP_FRACTION * 100}% cap of this ${contextWindow}-token window; clamped to ${capTokens}.`,
+		);
+		warnTokens = capTokens;
+		clamped = true;
 	}
 	if (softTokens > warnTokens) {
-		if (options.fromDefaults) {
-			notes.push(`Default --compact-soft-at (${parsed.soft.raw}) exceeds the warning threshold; clamped to ${warnTokens}.`);
-			softTokens = warnTokens;
-			clamped = true;
-		} else {
-			return {
-				ok: false,
-				error: `Invalid thresholds: --compact-soft-at (${parsed.soft.raw} = ${softTokens} tokens) must not exceed --compact-at (${parsed.warn.raw} = ${warnTokens} tokens).`,
-			};
-		}
+		notes.push(`${label}--compact-soft-at (${parsed.soft.raw}) exceeds the warning threshold; clamped to ${warnTokens}.`);
+		softTokens = warnTokens;
+		clamped = true;
 	}
 	const forcedTokens = Math.min(warnTokens + bufferTokens, capTokens);
 	if (warnTokens + bufferTokens > capTokens) {

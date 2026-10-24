@@ -91,12 +91,25 @@ test("launch 3: 20% / 50% / 0 with --compact-prompt: zero buffer, literal summar
 	}
 });
 
+test("token settings too big for the model window are clamped to fit, not rejected", async () => {
+	const t = makeTestDir("launch-clamped");
+	const client = new RpcClient({ args: scriptedArgs(t, ["--compact-soft-at", "160k", "--compact-at", "200k", "--compact-buffer", "40k"]), cwd: t.dir, env: DEFAULT_FAKE_ENV, logFile: t.logFile });
+	try {
+		const { text } = await info(client);
+		assert.doesNotMatch(text, /REJECTED/);
+		assert.match(text, /resolved: soft 160,000 \(80\.0%\), warning 180,000 \(90\.0%\), buffer 40,000, forced 180,000 \(90\.0%\)/);
+		const notices = client.events.filter((e) => e.type === "extension_ui_request" && e.method === "notify").map((e) => String(e.message));
+		assert.ok(notices.some((m) => /--compact-at \(200k\) exceeds the 90% cap of this 200000-token window; clamped to 180000/.test(m)), "the clamp is announced");
+	} finally {
+		await client.close();
+	}
+});
+
 test("invalid settings are rejected: info reports it and every tool is blocked", async () => {
 	const cases: Array<{ name: string; flags: string[]; pattern: RegExp }> = [
 		{ name: "reject-cap", flags: ["--compact-at", "95%"], pattern: /REJECTED: Invalid --compact-at: "95%" is above the 90% hard cap/ },
 		{ name: "reject-order", flags: ["--compact-soft-at", "60%", "--compact-at", "50%"], pattern: /REJECTED: Invalid thresholds: --compact-soft-at \(60%\) must not exceed --compact-at \(50%\)/ },
 		{ name: "reject-syntax", flags: ["--compact-buffer", "lots"], pattern: /REJECTED: Invalid --compact-buffer: "lots"/ },
-		{ name: "reject-mixed", flags: ["--compact-soft-at", "60%", "--compact-at", "500k"], pattern: /REJECTED: Invalid --compact-at: 500k \(500000 tokens\) exceeds the 90% cap/ },
 	];
 	for (const c of cases) {
 		const t = makeTestDir(c.name);

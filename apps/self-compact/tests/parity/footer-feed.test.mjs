@@ -128,8 +128,8 @@ test('F3: the feed reports the phase and the level that produced it', async t =>
 });
 
 test('F4: a rejected threshold reports no cutoff and a REJECTED phase', async t => {
-  // 500k does not fit a 200k window, so nothing resolves.
-  const h = await host(t, { flags: { 'compact-at': '500k' }, tokens: 130000 });
+  // 95% is above the 90% cap whatever the window, so nothing resolves.
+  const h = await host(t, { flags: { 'compact-at': '95%' }, tokens: 130000 });
   const feed = h.feeds.at(-1);
   assert.equal(feed.forcedTokens, null);
   assert.equal(feed.phase, 'REJECTED');
@@ -170,12 +170,13 @@ test('F7: a flag overrides the setting for its own key and leaves the others', a
   assert.equal(feed.forcedTokens, 120000);
 });
 
-test('F8: a threshold asked for by a setting is rejected, not clamped, when it cannot fit', async t => {
-  // 500k of a 200k window. Only the shipped defaults may be moved silently.
+test('F8: a threshold asked for by a setting is clamped to the window when it cannot fit', async t => {
+  // 500k of a 200k window: the same settings serve models with smaller windows, so they are fitted, not rejected.
   const h = await host(t, { settings: { selfCompact: { warnTokens: 500000 } }, tokens: 130000 });
   const feed = h.feeds.at(-1);
-  assert.equal(feed.forcedTokens, null);
-  assert.equal(feed.phase, 'REJECTED');
+  assert.equal(feed.warnTokens, 180000);
+  assert.equal(feed.forcedTokens, 180000);
+  assert.notEqual(feed.phase, 'REJECTED');
 });
 
 test('F9: a mistyped setting falls back to the default rather than breaking the session', async t => {
