@@ -55,6 +55,14 @@ just run --model openrouter/deepseek/deepseek-v4.1-flash             # shipped d
 just test && just e2e                                              # unit + deterministic end-to-end, no API cost
 ```
 
+### As a Pi package
+
+The repo root is a Pi package that loads only the extension, so another project can install it from git:
+
+```bash
+pi install git:github.com/theframeworks/self-compact-pi-agent        # add --local for the project's .pi/settings.json
+```
+
 There are no npm dependencies to install for the extension itself: Pi's loader supplies its packages at runtime and Node 24 strips the types for the tests.
 
 ---

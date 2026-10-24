@@ -1,0 +1,10 @@
+{
+  "name": "self-compact-pi-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pi package entry for the repo: `pi install git:github.com/theframeworks/self-compact-pi-agent` loads the self-compact extension from apps/self-compact.",
+  "type": "module",
+  "pi": {
+    "extensions": ["./apps/self-compact/extensions/self-compact/self-compact.ts"]
+  }
+}
