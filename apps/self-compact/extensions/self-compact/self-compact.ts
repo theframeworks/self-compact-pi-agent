@@ -17,7 +17,9 @@
  *   is returned verbatim as a handoff message (shown in full) that continues the same run. If that compaction fails,
  *   it is retried once the agent is idle and the note then starts the next run. When Pi would find nothing to
  *   compact (the session fits inside keepRecentTokens) the tool refuses instead of saving a note and locking.
- * - Failure or cancellation keeps the note and the lock; retries, /self-compact-now, reload and /tree recovery.
+ * - Failure or cancellation keeps the note and the lock; retries, /self-compact-now, reload and /tree recovery. The last
+ *   automatic retry uses Pi's built-in summary. If that fails too, the note is returned uncompacted and the tools are
+ *   unlocked; the lock and guidance stand down until a compaction succeeds, leaving the context to Pi's own compaction.
  * - Pi's automatic compaction (threshold or overflow) is cancelled while a note is saved, since the note brings its own.
  *   Without a note it is the backstop for a model that never handed off, and goes ahead with the replacement summary
  *   prompt (or Pi's built-in one if that fails).
@@ -133,6 +135,12 @@ interface Runtime {
 	alive: boolean;
 	idleRequestEpoch: number;
 	promptErrors: Set<string>;
+	/**
+	 * Compaction failed every way it was tried, so the note went back uncompacted. Until a compaction succeeds, the
+	 * forced lock and the guidance stand down: asking for another note would only fail the same way, and Pi's own
+	 * automatic compaction is the backstop. Runtime only: a reload tries again.
+	 */
+	standingDown: boolean;
 }
 
 function nowPrompt(saved?: string): string {
@@ -187,6 +195,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		alive: true,
 		idleRequestEpoch: -1,
 		promptErrors: new Set(),
+		standingDown: false,
 	};
 
 	const flag = (name: string): string | undefined => {
@@ -391,7 +400,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		if (inert() || !R.thresholds) return;
 		const level = R.level;
 		if (level === "unknown" || level === "idle") return;
-		if (level === "forced" && !locked() && !activeHandoff() && compactable(ctx)) {
+		if (level === "forced" && !locked() && !activeHandoff() && !R.standingDown && compactable(ctx)) {
 			setLocked(true);
 			save();
 		}
@@ -415,7 +424,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 
 	/** One transient guidance message is rebuilt from current usage for every LLM call. */
 	function guidanceText(ctx: ExtensionContext): string | undefined {
-		if (inert() || !R.thresholds || activeHandoff()) return undefined;
+		if (inert() || !R.thresholds || activeHandoff() || R.standingDown) return undefined;
 		const level = locked() ? "forced" : R.level;
 		if (level === "unknown" || level === "idle") return undefined;
 		if (!compactable(ctx)) return undefined;
@@ -755,6 +764,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		R.announcedLevel = "idle";
 		R.promptErrors.clear();
 		R.compactionInFlight = false;
+		R.standingDown = false;
 		R.searchDirs = promptSearchDirs(ctx.cwd, EXTENSION_DIR);
 		loadSettings(ctx.cwd);
 		resolve(ctx);
@@ -908,7 +918,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 
 	pi.on("agent_end", async (_event, ctx) => {
 		trackLevel(ctx);
-		if (inert() || activeHandoff() || R.idleRequestEpoch === R.epoch) return;
+		if (inert() || activeHandoff() || R.standingDown || R.idleRequestEpoch === R.epoch) return;
 		if (!locked() && R.level !== "warning" && R.level !== "forced") return;
 		R.idleRequestEpoch = R.epoch;
 		pi.sendMessage({ customType: GUIDANCE_TYPE, content: nowPrompt(), display: false }, { triggerTurn: true, deliverAs: "followUp" });
@@ -981,7 +991,15 @@ export default function selfCompact(pi: ExtensionAPI) {
 		}
 		if (!ctx.model) return undefined;
 		const summary = await summarize(event, ctx, event.reason);
-		return summary && "compaction" in summary ? summary : { cancel: true };
+		if (summary && "compaction" in summary) return summary;
+		// The last automatic attempt for a note: let Pi write its built-in summary rather than fail again the same way.
+		const h = activeHandoff();
+		if (summary && h && h.attempts >= MAX_AUTO_RETRIES - 1) {
+			notify(ctx, `self-compact: ${summary.error} Falling back to Pi's built-in summary.`, "warning");
+			R.lastCompactionError = undefined;
+			return undefined;
+		}
+		return { cancel: true };
 	});
 
 	/**
@@ -1029,6 +1047,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 
 	pi.on("session_compact", async (event, ctx) => {
 		R.epoch += 1;
+		R.standingDown = false;
 		R.announcedLevel = "idle";
 		R.compactionInFlight = false;
 		const h = handoff();
@@ -1067,8 +1086,18 @@ export default function selfCompact(pi: ExtensionAPI) {
 		if (canRetry) {
 			notify(ctx, `self-compact: compaction failed (attempt ${current.attempts}): ${current.error}. Note kept, tools stay locked, retrying automatically.`, "warning");
 			scheduleRetry(ctx);
+		} else if (ours || !event.aborted) {
+			// Every way of compacting failed. Keeping the tools locked would stop the agent for good: return the note
+			// uncompacted, unlock, and leave the context to Pi's automatic compaction.
+			R.standingDown = true;
+			R.state.handoff = { ...current, status: "ready" };
+			setLocked(false);
+			save();
+			refreshUi(ctx);
+			notify(ctx, `self-compact: compaction failed ${current.attempts} times: ${current.error}. Returning the note without compacting and restoring tools; Pi's automatic compaction takes over when the window fills.`, "error");
+			deliverHandoff(ctx);
 		} else {
-			notify(ctx, `self-compact: compaction ${event.aborted && !ours ? "cancelled" : "failed"} (attempt ${current.attempts}): ${current.error}. Note kept and tools stay locked. Run /self-compact-now or /compact to retry.`, "error");
+			notify(ctx, `self-compact: compaction cancelled (attempt ${current.attempts}): ${current.error}. Note kept and tools stay locked. Run /self-compact-now or /compact to retry.`, "error");
 		}
 	});
 }

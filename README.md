@@ -257,6 +257,7 @@ What you should see at the end of a real run: a `result.txt` containing `done`, 
 - Usage is Pi's estimate. A single huge tool result can jump past a threshold before the lock engages; the next call is still blocked.
 - The lock stops new tool calls. Tools already running when the note is saved finish on their own.
 - A model can ignore the warning. That is why the forced phase exists: at the hard cutoff nothing but `self_compact` works.
+- Compaction can fail outright (provider down, summary rejected). After two tries with the summary prompt and one with Pi's built-in summary, the note comes back uncompacted and the tools unlock, so the agent keeps working; the lock and guidance stand down until a compaction succeeds, and Pi's own automatic compaction catches the window.
 - Compaction quality is model quality. The summary prompt is yours to edit, and the note is never replaced by the summary.
 - Very small sessions have nothing to compact. Pi keeps the newest `keepRecentTokens` (20k by default) untouched, so `self_compact` refuses with that reason and the agent keeps working. Keep every threshold above that retained history.
 

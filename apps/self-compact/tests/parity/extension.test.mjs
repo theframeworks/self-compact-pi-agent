@@ -118,6 +118,42 @@ test('P1: automatic compaction cannot bypass the note, including before settleme
   assert.equal(h.requests[0].options.reasoningEffort, 'low');
 });
 
+test('P1: compaction that keeps failing falls back to Pi\'s summary, then returns the note uncompacted', async t => {
+  const h = await host(t);
+  h.usage(120000);
+  await h.emit('turn_end');
+  await h.execute();
+  h.prompt('COMPACTION_MESSAGE', '  ');
+  const state = () => h.entries.filter(entry => entry.customType === 'self-compact-state').at(-1).data;
+  // Attempts 1 and 2: our summary fails and the compaction is cancelled.
+  for (const attempt of [1, 2]) {
+    await h.emit('agent_settled');
+    assert.deepEqual(await h.emit('session_before_compact', summaryEvent()), { cancel: true }, `attempt ${attempt}`);
+    await h.emit('session_compact_failed', { reason: 'manual', aborted: true });
+    assert.equal(state().handoff.attempts, attempt);
+    assert.equal(state().locked, true);
+  }
+  // Attempt 3: Pi writes its built-in summary instead.
+  await h.emit('agent_settled');
+  assert.equal(await h.emit('session_before_compact', summaryEvent()), undefined);
+  assert.ok(h.notices.some(n => /Falling back to Pi's built-in summary/.test(n.message)));
+  // Pi's summary fails too: the note comes back uncompacted and the tools are unlocked.
+  await h.emit('session_compact_failed', { reason: 'manual', aborted: false, errorMessage: 'provider down' });
+  assert.equal(state().locked, false);
+  assert.equal(state().handoff.status, 'ready');
+  const handoff = h.messages.filter(m => m.customType === 'self-compact-handoff');
+  assert.equal(handoff.length, 1);
+  assert.equal(handoff[0].content, 'NEXT ACTION: continue');
+  // The lock and guidance stand down at the hard cutoff until a compaction succeeds.
+  await h.emit('message_end', { message: { role: 'custom', customType: 'self-compact-handoff', details: handoff[0].details } });
+  await h.emit('turn_end');
+  assert.equal(await h.emit('tool_call', { toolName: 'read' }), undefined);
+  assert.equal((await h.emit('context', { messages: [] })).messages.length, 0);
+  await h.emit('session_compact', { reason: 'threshold' });
+  await h.emit('turn_end');
+  assert.equal((await h.emit('tool_call', { toolName: 'read' })).block, true, 'the lock re-arms once a compaction succeeded');
+});
+
 test('P1: final-answer crossing requests one follow-up, soft advice does not', async t => {
   const h = await host(t);
   h.usage(45000);

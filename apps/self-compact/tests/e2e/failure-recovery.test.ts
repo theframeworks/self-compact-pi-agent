@@ -1,7 +1,8 @@
 /**
- * Failure and recovery: a failing summarizer keeps the note and the lock, /self-compact-now
- * includes the saved note verbatim, and a restart with --session restores the handoff and
- * finishes it once the summarizer works again.
+ * Failure and recovery: a failing summarizer keeps the note and the lock while retries remain,
+ * /self-compact-now includes the saved note verbatim, a restart with --session restores the handoff
+ * and finishes it once the summarizer works again, and when every attempt fails the note comes back
+ * uncompacted so the work goes on.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -25,48 +26,55 @@ function traceNotes(traceFile: string): string[] {
 		.map((r) => r.plan!.toolCall!.arguments!.note_to_self!);
 }
 
+test("compaction that keeps failing falls back to Pi's summary, then returns the note uncompacted and the work goes on", async () => {
+	const t = makeTestDir("failure-give-up");
+	const client = new RpcClient({
+		args: scriptedArgs(t, PERCENT_FLAGS),
+		cwd: t.dir,
+		env: { ...DEFAULT_FAKE_ENV, SC_FAKE_SCENARIO: "ignore-until-forced", SC_FAKE_TRACE: t.traceFile, SC_FAKE_SUMMARY_FAIL: "99" },
+		logFile: t.logFile,
+	});
+	try {
+		await client.request({ type: "prompt", message: "Start the scripted work." });
+		const handoff = await client.waitFor((e) => e.type === "message_end" && (e.message as { customType?: string })?.customType === "self-compact-handoff", 90_000);
+		await client.waitFor((e) => e.type === "tool_execution_end" && e.toolName === "write" && e.isError === false, 30_000, { since: client.events.indexOf(handoff) });
+		const events = client.events;
+		assert.ok(notifies(events, /Summary generation failed after 2 attempts: .*fake summary failure/).length >= 2, "our summary was tried in the turn and once idle");
+		assert.equal(notifies(events, /Falling back to Pi's built-in summary/).length, 1, "the last attempt used Pi's summary");
+		assert.equal(notifies(events, /Returning the note without compacting and restoring tools/).length, 1);
+		assert.equal(eventsOfType(events, "compaction_end").filter((e) => e.aborted === false && !e.errorMessage).length, 0, "nothing was compacted");
+		assert.equal(messageText(handoff.message), traceNotes(t.traceFile).pop(), "the note came back verbatim");
+		assert.equal(readFileSync(join(t.dir, "result.txt"), "utf8").trim(), "done", "the work resumed from the note");
+	} finally {
+		await client.close();
+	}
+});
+
 test("failed compaction keeps the note and the lock; /self-compact-now reuses the saved note; reload recovery finishes the handoff", async () => {
 	const t = makeTestDir("failure-recovery");
 	const env = { ...DEFAULT_FAKE_ENV, SC_FAKE_SCENARIO: "ignore-until-forced", SC_FAKE_TRACE: t.traceFile };
 
-	// ---- Run 1: the summarizer always fails.
+	// ---- Run 1: the summarizer always fails; the session is closed while the automatic retries are still going.
 	const first = new RpcClient({ args: scriptedArgs(t, PERCENT_FLAGS), cwd: t.dir, env: { ...env, SC_FAKE_SUMMARY_FAIL: "99" }, logFile: t.logFile });
 	let sessionFile: string | undefined;
 	try {
 		await first.request({ type: "prompt", message: "Start the scripted work." });
 		await first.waitFor((e) => e.type === "tool_execution_end" && e.toolName === "self_compact" && e.isError === false, 90_000);
-		// First failure, then automatic retries (attempt 2 after 2s, attempt 3 after 4s), then a final "run /self-compact-now" notice.
-		const finalFailure = await first.waitFor(
-			(e) => e.type === "extension_ui_request" && e.method === "notify" && /Run \/self-compact-now or \/compact to retry/.test(String(e.message)),
-			60_000,
-		);
-		// The first attempt runs inside the turn (no compaction events); the retries run once idle.
-		const failures = notifies(first.events, /Summary generation failed after 2 attempts/);
-		assert.ok(failures.length >= 3, `expected at least 3 failed compactions, saw ${failures.length}`);
-		assert.match(String(finalFailure.message), /Note kept and tools stay locked/);
-		assert.ok(notifies(first.events, /retrying automatically/).length >= 1, "automatic retry announced");
-		assert.ok(notifies(first.events, /Summary generation failed after 2 attempts: .*fake summary failure/).length >= 1, "real error recorded");
+		// The in-turn attempt fails, then the idle one, and another retry is scheduled.
+		await first.waitFor((e) => e.type === "extension_ui_request" && e.method === "notify" && /retrying automatically/.test(String(e.message)), 60_000);
+		assert.ok(notifies(first.events, /Summary generation failed after 2 attempts: .*fake summary failure/).length >= 2, "real error recorded");
 
-		// Note retained in the session ledger (latest state snapshot).
+		// Note retained in the session ledger (latest state snapshot), tools locked.
 		const entries = await first.request({ type: "get_entries" });
-		const list = ((entries.data as { entries?: Array<{ type: string; customType?: string; data?: { handoff?: { status?: string; note?: string; attempts?: number; error?: string } } }> })?.entries ?? []).filter(
+		const list = ((entries.data as { entries?: Array<{ type: string; customType?: string; data?: { locked?: boolean; handoff?: { status?: string; note?: string; attempts?: number; error?: string } } }> })?.entries ?? []).filter(
 			(e) => e.type === "custom" && e.customType === "self-compact-state",
 		);
 		const lastEntry = list[list.length - 1]!;
 		assert.equal(lastEntry.data?.handoff?.status, "failed");
+		assert.equal(lastEntry.data?.locked, true);
 		assert.ok((lastEntry.data?.handoff?.note ?? "").length > 10, "note retained");
-		assert.ok((lastEntry.data?.handoff?.attempts ?? 0) >= 3);
 		assert.match(lastEntry.data?.handoff?.error ?? "", /fake summary failure/);
 		const savedNote = lastEntry.data!.handoff!.note!;
-
-		// Tools are still locked: an ordinary tool call is blocked with the failure as the reason.
-		const mark = first.mark();
-		await first.request({ type: "prompt", message: "continue" });
-		const blocked = await first.waitFor((e) => e.type === "tool_execution_end" && e.toolName === "bash" && e.isError === true && /blocked by self-compact/.test(messageText(e.result)), 60_000, { since: mark });
-		assert.match(messageText(blocked.result), /the last compaction failed/);
-		assert.match(messageText(blocked.result), /self_compact/);
-		// The scripted agent hands off again; that compaction fails too (summarizer still broken).
-		await first.waitFor((e) => e.type === "extension_ui_request" && e.method === "notify" && /Run \/self-compact-now or \/compact to retry/.test(String(e.message)), 60_000, { since: mark });
 
 		// /self-compact-now includes the saved note verbatim and the agent passes it back unchanged.
 		const mark2 = first.mark();
@@ -81,7 +89,6 @@ test("failed compaction keeps the note and the lock; /self-compact-now reuses th
 		const notes = traceNotes(t.traceFile);
 		assert.equal(notes[notes.length - 1], savedNote, "agent reused the saved note instead of inventing one");
 		assert.equal(eventsOfType(first.events, "message_end").filter((e) => (e.message as { customType?: string })?.customType === "self-compact-handoff").length, 0, "no handoff delivered while compaction keeps failing");
-		await first.waitFor((e) => e.type === "extension_ui_request" && e.method === "notify" && /Run \/self-compact-now or \/compact to retry/.test(String(e.message)), 60_000, { since: mark2 });
 		sessionFile = latestSessionFile(t);
 		assert.ok(sessionFile, "session file persisted");
 	} finally {
