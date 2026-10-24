@@ -24,7 +24,7 @@ Values are percentages of the model window (`20%`) or token counts (`270000`, `1
 - `self_compact(note_to_self)`: saves the note (1 to 24,000 chars), ends the turn, compacts before the run settles, returns the note verbatim as the next message in the same run (a failed compaction is retried once idle). Refuses when Pi would find nothing to compact (the session still fits inside `keepRecentTokens`).
 - `view_context()`: the agent's own gauge as JSON: used tokens, percent, window, level, the three thresholds, tokens left before each, lock state, cycle count. Allowed even while other tools are locked.
 - `/self-compact-info`: settings, resolved thresholds, usage, state, cycles, prompt sources, pending note. No model turn.
-- `/self-compact-now`: asks the agent to write its note and call `self_compact` (reuses a saved note on retry). Built-in `/compact` is untouched and uses the same summary prompt.
+- `/self-compact-now`: asks the agent to write its note and call `self_compact` (reuses a saved note on retry). Built-in `/compact` is untouched and uses the same summary prompt. Pi's automatic compaction also uses it, and is held back only while a saved note waits for its own compaction.
 
 ## Prompt files
 

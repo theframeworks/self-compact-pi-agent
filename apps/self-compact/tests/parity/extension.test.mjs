@@ -89,10 +89,24 @@ function summaryEvent(overrides = {}) {
   };
 }
 
+test('P1: automatic compaction without a note goes ahead with our summary', async t => {
+  const h = await host(t);
+  for (const reason of ['threshold', 'overflow']) {
+    const result = await h.emit('session_before_compact', { ...summaryEvent(), reason });
+    assert.equal(result.compaction.summary.includes('Verified summary.'), true, reason);
+    assert.equal(result.compaction.details.selfCompact.reason, reason);
+  }
+  assert.equal(await h.emit('tool_call', { toolName: 'read' }), undefined, 'no lock: the context is being compacted');
+});
+
+test('P1: automatic compaction falls back to Pi\'s own summary when ours cannot be written', async t => {
+  const h = await host(t);
+  h.prompt('COMPACTION_MESSAGE', '  ');
+  assert.equal(await h.emit('session_before_compact', { ...summaryEvent(), reason: 'threshold' }), undefined);
+});
+
 test('P1: automatic compaction cannot bypass the note, including before settlement', async t => {
   const h = await host(t);
-  for (const reason of ['threshold', 'overflow']) assert.deepEqual(await h.emit('session_before_compact', { reason }), { cancel: true });
-  assert.equal((await h.emit('tool_call', { toolName: 'read' })).block, true);
   await h.execute();
   assert.deepEqual(await h.emit('session_before_compact', { reason: 'threshold' }), { cancel: true });
   await h.emit('session_compact_failed', { reason: 'threshold', aborted: true });

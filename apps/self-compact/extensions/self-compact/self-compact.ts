@@ -18,6 +18,9 @@
  *   it is retried once the agent is idle and the note then starts the next run. When Pi would find nothing to
  *   compact (the session fits inside keepRecentTokens) the tool refuses instead of saving a note and locking.
  * - Failure or cancellation keeps the note and the lock; retries, /self-compact-now, reload and /tree recovery.
+ * - Pi's automatic compaction (threshold or overflow) is cancelled while a note is saved, since the note brings its own.
+ *   Without a note it is the backstop for a model that never handed off, and goes ahead with the replacement summary
+ *   prompt (or Pi's built-in one if that fails).
  * - One-line replacement footer: model id on the left, the 20-cell context bar and phase on the right. Set
  *   `selfCompact.footer: false` in Pi settings to leave the footer to another extension (Pi has a single custom-footer
  *   slot, so two of them is last-writer-wins): the status line and the feed below still publish.
@@ -963,10 +966,18 @@ export default function selfCompact(pi: ExtensionAPI) {
 
 	pi.on("session_before_compact", async (event, ctx) => {
 		if (event.reason !== "manual") {
-			setLocked(true);
-			save();
-			refreshUi(ctx);
-			return { cancel: true };
+			// A saved note brings its own compaction: Pi's would summarize the conversation without it.
+			if (activeHandoff()) {
+				setLocked(true);
+				save();
+				refreshUi(ctx);
+				return { cancel: true };
+			}
+			// No note: the model never got to hand off (it ignored the guidance, or the window filled within one
+			// turn). Pi's compaction is the backstop, so it goes ahead with our summary, or with Pi's own if ours fails.
+			if (!ctx.model) return undefined;
+			const summary = await summarize(event, ctx, event.reason);
+			return summary && "compaction" in summary ? summary : undefined;
 		}
 		if (!ctx.model) return undefined;
 		const summary = await summarize(event, ctx, event.reason);
@@ -1037,7 +1048,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_compact_failed", async (event, ctx) => {
-		// We intentionally defer native auto-compaction until our idle handoff transaction.
+		// Pi's automatic compaction was cancelled because a saved note brings its own.
 		if (event.reason !== "manual" && event.aborted) return;
 		R.compactionInFlight = false;
 		if (!R.alive) return; // shutdown aborted the compaction: the saved note is recovered on the next session start
