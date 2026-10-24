@@ -40,7 +40,8 @@ test("failed compaction keeps the note and the lock; /self-compact-now reuses th
 			(e) => e.type === "extension_ui_request" && e.method === "notify" && /Run \/self-compact-now or \/compact to retry/.test(String(e.message)),
 			60_000,
 		);
-		const failures = eventsOfType(first.events, "compaction_end").filter((e) => e.aborted === true || e.errorMessage);
+		// The first attempt runs inside the turn (no compaction events); the retries run once idle.
+		const failures = notifies(first.events, /Summary generation failed after 2 attempts/);
 		assert.ok(failures.length >= 3, `expected at least 3 failed compactions, saw ${failures.length}`);
 		assert.match(String(finalFailure.message), /Note kept and tools stay locked/);
 		assert.ok(notifies(first.events, /retrying automatically/).length >= 1, "automatic retry announced");

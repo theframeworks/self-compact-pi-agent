@@ -12,9 +12,10 @@
  * - `view_context()` returns used tokens, percent, level, and the thresholds as JSON, since the model cannot see the footer.
  * - At the forced threshold every tool except `self_compact` and `view_context` is blocked in `tool_call` with an
  *   explicit reason (the active tool list is never narrowed: Pi would answer "Tool X not found" before the hook).
- * - `self_compact({ note_to_self })` saves the note, ends the run, compaction runs once the agent is idle with the
- *   replacement summary prompt (--compact-prompt > USER_PROMPT_COMPACTION_MESSAGE.md > built-in), and the note is
- *   returned verbatim as a handoff message (shown in full) that starts the next turn. When Pi would find nothing to
+ * - `self_compact({ note_to_self })` saves the note and ends the turn; before the run settles, the session is compacted
+ *   with the replacement summary prompt (--compact-prompt > USER_PROMPT_COMPACTION_MESSAGE.md > built-in) and the note
+ *   is returned verbatim as a handoff message (shown in full) that continues the same run. If that compaction fails,
+ *   it is retried once the agent is idle and the note then starts the next run. When Pi would find nothing to
  *   compact (the session fits inside keepRecentTokens) the tool refuses instead of saving a note and locking.
  * - Failure or cancellation keeps the note and the lock; retries, /self-compact-now, reload and /tree recovery.
  * - One-line replacement footer: model id on the left, the 20-cell context bar and phase on the right. Set
@@ -28,8 +29,8 @@
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { generateSummary, hasCompactionMaterial, keepRecentTokens } from "./summary.ts";
+import { getAgentDir, type CompactionResult, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { compactionSettings, generateSummary, hasCompactionMaterial, keepRecentTokens, prepareHandoffCompaction, type SummaryInput } from "./summary.ts";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -418,9 +419,14 @@ export default function selfCompact(pi: ExtensionAPI) {
 		return renderGuidance(level);
 	}
 
+	/** True once the session holds the handoff message returning this note. */
+	function journaled(ctx: ExtensionContext, id: string): boolean {
+		return ctx.sessionManager.getBranch().some((e) => e.type === "custom_message" && e.customType === HANDOFF_TYPE && (e.details as { id?: string } | undefined)?.id === id);
+	}
+
 	function deliverHandoff(ctx: ExtensionContext) {
 		const h = handoff();
-		if (!R.alive || !h || h.status !== "ready") return;
+		if (!R.alive || !h || h.status !== "ready" || journaled(ctx, h.id)) return;
 		if (!ctx.isIdle()) {
 			if (!R.deliveryTimer) {
 				const epoch = R.epoch;
@@ -574,7 +580,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: TOOL_NAME,
 		label: "Self Compact",
-		description: `Hand off to yourself across a context compaction. Provide note_to_self (1 to ${NOTE_MAX_CHARS} characters): the goal, DONE work with exact file paths and commands, IN PROGRESS state, key decisions, verified test results, and the exact NEXT ACTION as the last line. Call it alone in a tool batch. The note is saved, this run ends, the context is compacted once you are idle, and the note is returned verbatim so you continue from NEXT ACTION. At the hard cutoff every other tool is blocked until this succeeds.`,
+		description: `Hand off to yourself across a context compaction. Provide note_to_self (1 to ${NOTE_MAX_CHARS} characters): the goal, DONE work with exact file paths and commands, IN PROGRESS state, key decisions, verified test results, and the exact NEXT ACTION as the last line. Call it alone in a tool batch. The note is saved, this turn ends, the context is compacted, and the note is returned verbatim so you continue from NEXT ACTION. At the hard cutoff every other tool is blocked until this succeeds.`,
 		promptSnippet: "Compact your own context: save a note_to_self, compaction runs when the turn ends, the note comes back verbatim",
 		promptGuidelines: [
 			`Use ${TOOL_NAME} alone in a tool batch when a [self-compact · …] message asks you to compact, or at a clean checkpoint when context is high.`,
@@ -834,6 +840,12 @@ export default function selfCompact(pi: ExtensionAPI) {
 
 	pi.on("message_end", async (event, ctx) => {
 		if (event.message.role === "assistant") {
+			// The model has answered a note returned inside its run (agent_before_settle): the handoff is complete.
+			const h = handoff();
+			if (h && h.status === "ready" && journaled(ctx, h.id)) {
+				R.state.handoff = { ...h, status: "done" };
+				save();
+			}
 			trackLevel(ctx);
 			return;
 		}
@@ -909,6 +921,46 @@ export default function selfCompact(pi: ExtensionAPI) {
 		else if (h.status === "pending" || (h.status === "failed" && h.attempts < MAX_AUTO_RETRIES && R.lastCompactionError)) startCompaction(ctx, h.status === "pending" ? "agent idle" : "retry after failure");
 	});
 
+	/**
+	 * A compaction summary from the replacement prompt, tagged with the handoff it carries, or the reason none could
+	 * be written (also kept in R.lastCompactionError). Undefined when cancelled.
+	 */
+	async function summarize(input: SummaryInput, ctx: ExtensionContext, reason: string): Promise<{ compaction: CompactionResult } | { error: string } | undefined> {
+		R.lastCompactionError = undefined;
+		let prompt;
+		try { prompt = resolveCompactionPrompt({ flag: R.compactPromptFlag, searchDirs: R.searchDirs }); }
+		catch (error) {
+			R.lastCompactionError = error instanceof Error ? error.message : String(error);
+			notify(ctx, `self-compact: ${R.lastCompactionError}`, "error");
+			return { error: R.lastCompactionError };
+		}
+		const h = activeHandoff();
+		let lastError = "unknown error";
+		for (let attempt = 1; attempt <= SUMMARY_ATTEMPTS; attempt++) {
+			if (input.signal.aborted) return undefined;
+			try {
+				const instructions = loadPromptFile("summaryInstructions", R.searchDirs);
+				const { result, truncatedInput } = await generateSummary(input, ctx, prompt, instructions);
+				return {
+					compaction: {
+						...result,
+						details: {
+							...(result.details as Record<string, unknown>),
+							handoffId: h?.id,
+							selfCompact: { cycle: R.state.cycle + (h ? 1 : 0), promptSource: prompt.source, userPromptSource: instructions.source, reason, noteChars: h?.note.length ?? 0, truncatedInput, attempt },
+						},
+					},
+				};
+			} catch (error) {
+				lastError = error instanceof Error ? error.message : String(error);
+				if (input.signal.aborted) return undefined;
+			}
+		}
+		R.lastCompactionError = `Summary generation failed after ${SUMMARY_ATTEMPTS} attempts: ${lastError}`;
+		notify(ctx, `self-compact: ${R.lastCompactionError}`, "error");
+		return { error: R.lastCompactionError };
+	}
+
 	pi.on("session_before_compact", async (event, ctx) => {
 		if (event.reason !== "manual") {
 			setLocked(true);
@@ -916,43 +968,52 @@ export default function selfCompact(pi: ExtensionAPI) {
 			refreshUi(ctx);
 			return { cancel: true };
 		}
-		R.lastCompactionError = undefined;
-		const model = ctx.model;
-		if (!model) return undefined;
-		const { signal } = event;
-		let prompt;
-		try { prompt = resolveCompactionPrompt({ flag: R.compactPromptFlag, searchDirs: R.searchDirs }); }
-		catch (error) {
-			R.lastCompactionError = error instanceof Error ? error.message : String(error);
-			notify(ctx, `self-compact: ${R.lastCompactionError}`, "error");
-			return { cancel: true };
-		}
-		const h = activeHandoff();
+		if (!ctx.model) return undefined;
+		const summary = await summarize(event, ctx, event.reason);
+		return summary && "compaction" in summary ? summary : { cancel: true };
+	});
 
-		let lastError = "unknown error";
-		for (let attempt = 1; attempt <= SUMMARY_ATTEMPTS; attempt++) {
-			if (signal.aborted) return { cancel: true };
-			try {
-				const instructions = loadPromptFile("summaryInstructions", R.searchDirs);
-				const { result, truncatedInput } = await generateSummary(event, ctx, prompt, instructions);
-				return {
-					compaction: {
-						...result,
-						details: {
-							...(result.details as Record<string, unknown>),
-							handoffId: h?.id,
-							selfCompact: { cycle: R.state.cycle + (h ? 1 : 0), promptSource: prompt.source, userPromptSource: instructions.source, reason: event.reason, noteChars: h?.note.length ?? 0, truncatedInput, attempt },
-						},
-					},
-				};
-			} catch (error) {
-				lastError = error instanceof Error ? error.message : String(error);
-				if (signal.aborted) return { cancel: true };
-			}
+	/**
+	 * The handoff, inside the run that saved the note: compacts and returns the note before the run settles, so
+	 * whoever waits for the run (a subagent's parent, an SDK caller, print mode) sees the work go on rather than
+	 * stop at the note. Failing that, the handoff falls back to compacting once the agent is idle (agent_settled).
+	 */
+	pi.on("agent_before_settle", async (event, ctx) => {
+		if (!R.alive || inert() || event.outcome === "aborted" || !ctx.model) return undefined;
+		const h = activeHandoff();
+		if (!h || (h.status !== "pending" && h.status !== "failed")) return undefined;
+		const preparation = prepareHandoffCompaction(ctx.sessionManager.getBranch(), compactionSettings(ctx.cwd));
+		if (!preparation) return undefined;
+		R.compactionInFlight = true;
+		R.state.handoff = { ...h, status: "compacting" };
+		save();
+		notify(ctx, `self-compact: compacting (end of turn, note ${h.note.length} chars)…`, "info");
+		refreshUi(ctx);
+		const summary = await summarize({ preparation, customInstructions: undefined, signal: ctx.signal ?? new AbortController().signal }, ctx, "handoff");
+		R.compactionInFlight = false;
+		if (!summary || !("compaction" in summary)) {
+			R.state.handoff = { ...h, status: "failed", attempts: h.attempts + 1, error: summary?.error ?? "compaction was cancelled" };
+			save();
+			refreshUi(ctx);
+			return undefined;
 		}
-		R.lastCompactionError = `Summary generation failed after ${SUMMARY_ATTEMPTS} attempts: ${lastError}`;
-		notify(ctx, `self-compact: ${R.lastCompactionError}`, "error");
-		return { cancel: true };
+		// Saved as ready, not done: until the model has read the note, a reload must still find it to return.
+		R.state.cycle += 1;
+		R.state.handoff = { ...h, status: "ready", error: undefined };
+		setLocked(false);
+		save();
+		R.epoch += 1;
+		R.announcedLevel = "idle";
+		const { summary: text, firstKeptEntryId, details, usage } = summary.compaction;
+		notify(ctx, `self-compact: compaction succeeded (cycle ${R.state.cycle}); returning the note (${h.note.length} chars) and restoring tools.`, "info");
+		return {
+			entries: [
+				...event.entries,
+				{ type: "compaction", summary: text, firstKeptEntryId, details, usage },
+				{ type: "custom_message", customType: HANDOFF_TYPE, content: h.note, display: true, details: { id: h.id, cycle: R.state.cycle, note: h.note } },
+			],
+			continue: true,
+		};
 	});
 
 	pi.on("session_compact", async (event, ctx) => {

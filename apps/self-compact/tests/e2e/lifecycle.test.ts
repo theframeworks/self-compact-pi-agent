@@ -20,8 +20,22 @@ function entries(events: RpcEvent[], customType: string): Array<{ event: RpcEven
 		.map((e) => ({ event: e, data: ((e.entry as { data?: Record<string, unknown> }).data ?? {}) as Record<string, unknown> }));
 }
 
+/** The handoff is committed with its compaction inside the run, so it reaches the session as an appended entry. */
+const isHandoff = (e: RpcEvent): boolean =>
+	e.type === "entry_appended" && (e.entry as { type?: string; customType?: string } | undefined)?.customType === HANDOFF;
+
 function handoffMessages(events: RpcEvent[]): RpcEvent[] {
-	return eventsOfType(events, "message_end").filter((e) => (e.message as { role?: string; customType?: string } | undefined)?.customType === HANDOFF);
+	return events.filter(isHandoff);
+}
+
+interface CompactionEntryLike {
+	type?: string;
+	summary?: string;
+	details?: { handoffId?: string };
+}
+
+function compactions(events: RpcEvent[]): CompactionEntryLike[] {
+	return eventsOfType(events, "entry_appended").map((e) => e.entry as CompactionEntryLike).filter((entry) => entry.type === "compaction");
 }
 
 function toolEnds(events: RpcEvent[], toolName: string): RpcEvent[] {
@@ -48,7 +62,7 @@ function resultText(e: RpcEvent): string {
 }
 
 async function waitForCompletion(client: RpcClient): Promise<RpcEvent> {
-	const handoff = await client.waitFor((e) => e.type === "message_end" && (e.message as { customType?: string })?.customType === HANDOFF, 90_000);
+	const handoff = await client.waitFor(isHandoff, 90_000);
 	const after = client.events.indexOf(handoff);
 	await client.waitFor((e) => e.type === "tool_execution_end" && e.toolName === "write", 30_000, { since: after });
 	await client.waitFor((e) => e.type === "agent_settled", 60_000, { since: after });
@@ -72,7 +86,10 @@ test("lifecycle: thresholds, lock, self_compact, compaction, verbatim note, cont
 		// 1. Threshold crossings are recorded (TUI-only lines) in level order, inside ONE run.
 		const phases = entries(events, "self-compact-phase").map((p) => p.data.level);
 		assert.deepEqual(phases.slice(0, 3), ["notice", "warning", "forced"]);
-		assert.equal(eventsOfType(events, "agent_start").length, 2, "one run for the task, one run started by the handoff");
+		// Pi starts a fresh agent loop for the continuation, but the run (what session.prompt() waits for) settles once.
+		const settled = eventsOfType(events, "agent_settled");
+		assert.equal(settled.length, 1, "the run settles once, after the work resumed from the note");
+		assert.ok(events.indexOf(handoffEvent) < events.indexOf(settled[0]!), "the note came back before the run settled");
 
 		// 2. Guidance reached the model as transient messages with live values, and nothing extra was persisted.
 		const turns = trace(t.traceFile).filter((r) => r.kind === "turn");
@@ -83,7 +100,9 @@ test("lifecycle: thresholds, lock, self_compact, compaction, verbatim note, cont
 		assert.match(warning!.lastText ?? "", /Hard cutoff at 120,000/, "warning carries the live forced token count");
 		assert.ok(seen(/^\[self-compact · \uf023\]/), "model saw the forced guidance");
 		const persistedRoles = eventsOfType(events, "message_end").map((e) => (e.message as { role?: string; customType?: string }).role + ":" + ((e.message as { customType?: string }).customType ?? ""));
-		assert.equal(persistedRoles.filter((r) => r.startsWith("custom:")).length, 1, "the only persisted custom message is the handoff");
+		assert.equal(persistedRoles.filter((r) => r.startsWith("custom:")).length, 0, "no custom message went through the model's turn");
+		const customMessages = eventsOfType(events, "entry_appended").filter((e) => (e.entry as { type?: string }).type === "custom_message");
+		assert.deepEqual(customMessages.map((e) => (e.entry as { customType?: string }).customType), [HANDOFF], "the only persisted custom message is the handoff");
 		assert.equal(persistedRoles.filter((r) => r === "user:").length, 1, "the only user message is the user's prompt");
 
 		// 3. Forced lock blocked an ordinary tool with a reason that names self_compact.
@@ -94,26 +113,24 @@ test("lifecycle: thresholds, lock, self_compact, compaction, verbatim note, cont
 		const okBash = toolEnds(events, "bash").filter((e) => e.isError === false);
 		assert.ok(okBash.length >= 3, "the scripted bash steps ran successfully before the lock (shell filler works in this environment)");
 
-		// 4. self_compact accepted the note and ended the run; compaction ran only once idle.
+		// 4. self_compact accepted the note; the compaction landed before the run settled, with no idle gap.
 		const selfCompact = toolEnds(events, "self_compact");
 		assert.equal(selfCompact.length, 1, "self_compact called exactly once");
 		assert.equal(selfCompact[0]!.isError, false);
 		assert.match(resultText(selfCompact[0]!), /Note saved/);
-		const firstCompactionStart = eventsOfType(events, "compaction_start")[0]!;
-		assert.ok(eventsOfType(events, "agent_end").some((e) => events.indexOf(e) < events.indexOf(firstCompactionStart)), "run ended before compaction started");
-		const compactionEnd = eventsOfType(events, "compaction_end")[0]!;
-		assert.equal(compactionEnd.aborted, false);
-		const result = compactionEnd.result as { summary?: string; details?: { handoffId?: string; selfCompact?: { promptSource?: string } } };
+		const result = compactions(events)[0]!;
+		assert.ok(result, "a compaction entry was appended");
 		assert.match(result.summary ?? "", /FAKE-SUMMARY\[You are the context-compaction summarizer/, "summary produced with our compaction prompt file");
 		assert.ok(result.details?.handoffId, "compaction carries the durable handoff id");
 
 		// 5. The note came back verbatim, once, and the agent continued without a user message.
 		const note = noteFromTrace(t.traceFile);
 		assert.ok(note.length > 10, "note captured from trace");
-		const handoffText = messageText(handoffEvent.message);
+		const handoffEntry = handoffEvent.entry as { details?: { note?: string; cycle?: number } };
+		const handoffText = messageText(handoffEntry);
 		assert.equal(handoffText, note, "handoff message content is exactly the note");
-		assert.deepEqual((handoffEvent.message as { details?: { note?: string; cycle?: number } }).details?.cycle, 1);
-		assert.equal((handoffEvent.message as { details?: { note?: string } }).details?.note, note, "details carry the exact note");
+		assert.deepEqual(handoffEntry.details?.cycle, 1);
+		assert.equal(handoffEntry.details?.note, note, "details carry the exact note");
 		assert.equal(handoffMessages(events).length, 1);
 
 		// 6. Tools were restored and real work resumed: result.txt == done.
@@ -152,7 +169,7 @@ test("sibling tools in the self_compact batch are blocked in either order", asyn
 			assert.equal(existsSync(join(t.dir, "sibling.txt")), false, `${position}: the sibling never ran`);
 			assert.equal(toolEnds(client.events, "self_compact")[0]!.isError, false);
 			assert.equal(readFileSync(join(t.dir, "result.txt"), "utf8").trim(), "done");
-			assert.equal(eventsOfType(client.events, "agent_start").length, 2, `${position}: the blocked sibling terminated the batch (no extra model call before compaction)`);
+			assert.equal(eventsOfType(client.events, "agent_settled").length, 1, `${position}: one run, handoff included`);
 		} finally {
 			await client.close();
 		}
@@ -169,8 +186,8 @@ test("two cycles: guidance and the forced lock re-arm after a completed handoff"
 	});
 	try {
 		await client.request({ type: "prompt", message: "Start the scripted work." });
-		const first = await client.waitFor((e) => e.type === "message_end" && (e.message as { customType?: string })?.customType === HANDOFF, 90_000);
-		const second = await client.waitFor((e) => e.type === "message_end" && (e.message as { customType?: string })?.customType === HANDOFF, 120_000, { since: client.events.indexOf(first) + 1 });
+		const first = await client.waitFor(isHandoff, 90_000);
+		const second = await client.waitFor(isHandoff, 120_000, { since: client.events.indexOf(first) + 1 });
 		await client.waitFor((e) => e.type === "tool_execution_end" && e.toolName === "write", 30_000, { since: client.events.indexOf(second) });
 		await client.waitFor((e) => e.type === "agent_settled", 60_000, { since: client.events.indexOf(second) });
 		const events = client.events;
@@ -179,8 +196,8 @@ test("two cycles: guidance and the forced lock re-arm after a completed handoff"
 		const blocked = toolEnds(events, "bash").filter((e) => e.isError === true && /at or above the forced threshold/.test(resultText(e)));
 		assert.equal(blocked.length, 2, "the forced lock engaged in both cycles");
 		assert.equal(toolEnds(events, "self_compact").filter((e) => e.isError === false).length, 2);
-		assert.equal(eventsOfType(events, "compaction_end").filter((e) => e.aborted === false).length, 2);
-		const ids = handoffMessages(events).map((e) => (e.message as { details?: { id?: string; cycle?: number } }).details);
+		assert.equal(compactions(events).length, 2);
+		const ids = handoffMessages(events).map((e) => (e.entry as { details?: { id?: string; cycle?: number } }).details);
 		assert.equal(ids.length, 2);
 		assert.notEqual(ids[0]?.id, ids[1]?.id, "each cycle has its own durable handoff id");
 		assert.deepEqual(ids.map((d) => d?.cycle), [1, 2]);
@@ -217,12 +234,12 @@ test("note validation: blank rejected, 24001 chars rejected, 24000 chars accepte
 				assert.equal(calls[1]!.isError, false);
 			} else if (mode === "maxlen") {
 				assert.equal(calls[0]!.isError, false, "24000-char note accepted");
-				assert.equal(messageText(handoff.message), "y".repeat(24_000), "24000-char note returned verbatim");
+				assert.equal(messageText(handoff.entry), "y".repeat(24_000), "24000-char note returned verbatim");
 			} else {
 				assert.equal(calls[0]!.isError, false, "note with surrounding whitespace accepted");
 				const raw = noteFromTrace(t.traceFile);
 				assert.notEqual(raw, raw.trim(), "test note really has surrounding whitespace");
-				assert.equal(messageText(handoff.message), raw, "whitespace preserved byte for byte");
+				assert.equal(messageText(handoff.entry), raw, "whitespace preserved byte for byte");
 			}
 			assert.equal(readFileSync(join(t.dir, "result.txt"), "utf8").trim(), "done");
 		} finally {
