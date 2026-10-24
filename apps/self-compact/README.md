@@ -1,6 +1,6 @@
 # self-compact
 
-The Pi (v0.85.1) extension. The story, the demo, and the install steps are in the [root README](../../README.md). This page is the reference.
+The Pi (v1.3.0) extension. The story, the demo, and the install steps are in the [root README](../../README.md). This page is the reference.
 
 ## Run
 

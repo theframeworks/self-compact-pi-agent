@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import {
 	compact,
 	convertToLlm,
-	estimateTokens,
 	findCutPoint,
 	serializeConversation,
 	sessionEntryToContextMessages,
@@ -20,16 +19,19 @@ type Preparation = Parameters<typeof compact>[0];
 type CompactionSettings = Preparation["settings"];
 type FileOperations = Preparation["fileOps"];
 
-/** The files a message's tool calls read, wrote or edited, as Pi records them in a compaction. */
+/** The files a message's tool calls read, wrote or edited, as Pi records them in a compaction (calls made from a
+ * codemode script are recorded on the script's tool result). */
 function addFileOps(message: AgentMessage, fileOps: FileOperations) {
-	if (message.role !== "assistant" || !Array.isArray(message.content)) return;
-	for (const block of message.content) {
-		if (block.type !== "toolCall") continue;
-		const path = (block.arguments as { path?: unknown } | undefined)?.path;
+	const calls: Array<{ name: string; arguments?: unknown }> =
+		message.role === "toolResult" ? (message.nestedCalls?.calls ?? [])
+			: message.role === "assistant" ? message.content.filter((block) => block.type === "toolCall")
+				: [];
+	for (const call of calls) {
+		const path = (call.arguments as { path?: unknown } | undefined)?.path;
 		if (typeof path !== "string") continue;
-		if (block.name === "read") fileOps.read.add(path);
-		else if (block.name === "write") fileOps.written.add(path);
-		else if (block.name === "edit") fileOps.edited.add(path);
+		if (call.name === "read") fileOps.read.add(path);
+		else if (call.name === "write") fileOps.written.add(path);
+		else if (call.name === "edit") fileOps.edited.add(path);
 	}
 }
 
@@ -37,66 +39,92 @@ function addFileOps(message: AgentMessage, fileOps: FileOperations) {
 const conversationOf = (entry: SessionEntry): AgentMessage[] =>
 	entry.type === "compaction" ? [] : sessionEntryToContextMessages(entry).filter((message) => message.role !== "system");
 
+interface CutPlan {
+	/** First entry after the previous compaction's kept history (0 without one). */
+	boundaryStart: number;
+	previous?: CompactionEntry;
+	firstKeptEntryIndex: number;
+	historyEnd: number;
+	/** Start of the split turn, or -1. */
+	turnStartIndex: number;
+}
+
 /**
- * Mirrors Pi's prepareCompaction(), which Pi doesn't export: what a compaction of this branch would summarize
- * and where the kept history starts. Undefined when Pi would answer "Nothing to compact" (everything fits inside
- * keepRecentTokens, or the last entry is already a compaction). The extension prepares its own compaction for a
- * handoff, which it commits inside the run that saved the note.
+ * Where a compaction of this branch would cut, the way Pi's prepareCompaction() finds it. Undefined when the last
+ * entry is already a compaction. Pi doesn't export prepareCompaction(), so this walks the raw branch with the
+ * exported findCutPoint(); Pi walks the session projection, which differs only after context edits.
+ */
+function planCut(entries: SessionEntry[], keepRecentTokens: number): CutPlan | undefined {
+	if (entries.length === 0 || entries[entries.length - 1]!.type === "compaction") return undefined;
+	let previous: CompactionEntry | undefined;
+	let boundaryStart = 0;
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i]!;
+		if (entry.type !== "compaction") continue;
+		previous = entry;
+		const firstKept = entries.findIndex((e) => e.id === entry.firstKeptEntryId);
+		boundaryStart = firstKept >= 0 ? firstKept : i + 1;
+		break;
+	}
+	const cut = findCutPoint(entries, boundaryStart, entries.length, keepRecentTokens);
+	return {
+		boundaryStart,
+		previous,
+		firstKeptEntryIndex: cut.firstKeptEntryIndex,
+		historyEnd: cut.isSplitTurn ? cut.turnStartIndex : cut.firstKeptEntryIndex,
+		turnStartIndex: cut.isSplitTurn ? cut.turnStartIndex : -1,
+	};
+}
+
+/**
+ * True when a compaction of this branch would have at least one message to summarize, false when Pi would fail
+ * with "Nothing to compact" (everything fits inside keepRecentTokens, or the last entry is already a compaction).
+ * Runs before every model call, so it stops at the first message.
+ */
+export function hasCompactionMaterial(entries: SessionEntry[], keepRecentTokens: number): boolean {
+	const plan = planCut(entries, keepRecentTokens);
+	if (!plan) return false;
+	const has = (from: number, to: number) => entries.slice(from, to).some((entry) => conversationOf(entry).length > 0);
+	return has(plan.boundaryStart, plan.historyEnd) || (plan.turnStartIndex >= 0 && has(plan.turnStartIndex, plan.firstKeptEntryIndex));
+}
+
+/**
+ * The compaction a handoff commits inside the run that saved the note, prepared as Pi's prepareCompaction() would.
+ * Undefined when there is nothing to compact. tokensBefore is left at 0: compact() only copies it into its result,
+ * which the boundary entry doesn't carry, and Pi computes it when it appends the entry.
  */
 export function prepareHandoffCompaction(entries: SessionEntry[], settings: CompactionSettings): Preparation | undefined {
-	if (entries.length === 0 || entries[entries.length - 1]!.type === "compaction") return undefined;
-	let previous = -1;
-	for (let i = entries.length - 1; i >= 0; i--) {
-		if (entries[i]!.type === "compaction") {
-			previous = i;
-			break;
-		}
-	}
-	let boundaryStart = 0;
-	let previousEntry: CompactionEntry | undefined;
-	if (previous >= 0) {
-		previousEntry = entries[previous] as CompactionEntry;
-		const firstKept = entries.findIndex((entry) => entry.id === previousEntry!.firstKeptEntryId);
-		boundaryStart = firstKept >= 0 ? firstKept : previous + 1;
-	}
-	const cut = findCutPoint(entries, boundaryStart, entries.length, settings.keepRecentTokens);
-	const firstKeptEntryId = entries[cut.firstKeptEntryIndex]?.id;
-	if (!firstKeptEntryId) return undefined;
-	const historyEnd = cut.isSplitTurn ? cut.turnStartIndex : cut.firstKeptEntryIndex;
-	const messagesToSummarize = entries.slice(boundaryStart, historyEnd).flatMap(conversationOf);
-	const turnPrefixMessages = cut.isSplitTurn ? entries.slice(cut.turnStartIndex, cut.firstKeptEntryIndex).flatMap(conversationOf) : [];
+	const plan = planCut(entries, settings.keepRecentTokens);
+	const firstKeptEntryId = plan && entries[plan.firstKeptEntryIndex]?.id;
+	if (!plan || !firstKeptEntryId) return undefined;
+	const messagesToSummarize = entries.slice(plan.boundaryStart, plan.historyEnd).flatMap(conversationOf);
+	const turnPrefixMessages = plan.turnStartIndex >= 0 ? entries.slice(plan.turnStartIndex, plan.firstKeptEntryIndex).flatMap(conversationOf) : [];
 	if (messagesToSummarize.length === 0 && turnPrefixMessages.length === 0) return undefined;
 	const fileOps: FileOperations = { read: new Set(), written: new Set(), edited: new Set() };
-	const previousFiles = previousEntry && !previousEntry.fromHook ? (previousEntry.details as { readFiles?: unknown; modifiedFiles?: unknown } | undefined) : undefined;
+	const previousFiles = plan.previous && !plan.previous.fromHook ? (plan.previous.details as { readFiles?: unknown; modifiedFiles?: unknown } | undefined) : undefined;
 	if (Array.isArray(previousFiles?.readFiles)) for (const f of previousFiles.readFiles) fileOps.read.add(String(f));
 	if (Array.isArray(previousFiles?.modifiedFiles)) for (const f of previousFiles.modifiedFiles) fileOps.edited.add(String(f));
 	for (const message of [...messagesToSummarize, ...turnPrefixMessages]) addFileOps(message, fileOps);
-	const tokensBefore = entries.slice(boundaryStart).flatMap(conversationOf).reduce((sum, message) => sum + estimateTokens(message), 0);
 	return {
 		firstKeptEntryId,
 		messagesToSummarize,
 		turnPrefixMessages,
-		isSplitTurn: cut.isSplitTurn,
-		tokensBefore,
-		previousSummary: previousEntry?.summary,
+		isSplitTurn: plan.turnStartIndex >= 0,
+		tokensBefore: 0,
+		previousSummary: plan.previous?.summary,
 		fileOps,
 		settings,
 	};
 }
 
-/** True when a compaction of this branch would have at least one message to summarize. */
-export function hasCompactionMaterial(entries: SessionEntry[], keepRecentTokens: number): boolean {
-	return prepareHandoffCompaction(entries, { enabled: true, reserveTokens: 0, keepRecentTokens }) !== undefined;
+/** Pi's compaction settings for this working directory and model (per-model overrides included). */
+export function compactionSettings(cwd: string, model?: { provider: string; id: string }): CompactionSettings {
+	return SettingsManager.create(cwd).getCompactionSettings(model);
 }
 
-/** Pi's compaction settings for this working directory (global settings merged with the project's). */
-export function compactionSettings(cwd: string): CompactionSettings {
-	return SettingsManager.create(cwd).getCompactionSettings();
-}
-
-/** Pi's retained recent history for this working directory (global settings merged with the project's). */
-export function keepRecentTokens(cwd: string): number {
-	return SettingsManager.create(cwd).getCompactionKeepRecentTokens();
+/** Pi's retained recent history, in tokens: what a compaction never summarizes. */
+export function keepRecentTokens(cwd: string, model?: { provider: string; id: string }): number {
+	return compactionSettings(cwd, model).keepRecentTokens;
 }
 
 function historyInput(messages: SessionBeforeCompactEvent["preparation"]["messagesToSummarize"], previous?: string): string {

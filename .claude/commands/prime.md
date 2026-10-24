@@ -4,7 +4,7 @@ description: Prime Claude with the self-compact codebase: a standalone Pi extens
 
 # Purpose
 
-Orient yourself in this repository: one Pi (v0.85.1) extension in `apps/self-compact/` that watches context usage against three thresholds, locks tools at the hard cutoff, lets the agent read its own usage through `view_context()`, and hands the agent off to itself through `self_compact(note_to_self)`, plus the specs and Pi docs that shaped it.
+Orient yourself in this repository: one Pi (v1.3.0) extension in `apps/self-compact/` that watches context usage against three thresholds, locks tools at the hard cutoff, lets the agent read its own usage through `view_context()`, and hands the agent off to itself through `self_compact(note_to_self)`, plus the specs and Pi docs that shaped it.
 
 ## Workflow
 

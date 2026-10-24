@@ -136,7 +136,7 @@ test('P1: compaction that keeps failing falls back to Pi\'s summary, then return
   // Attempt 3: Pi writes its built-in summary instead.
   await h.emit('agent_settled');
   assert.equal(await h.emit('session_before_compact', summaryEvent()), undefined);
-  assert.ok(h.notices.some(n => /Falling back to Pi's built-in summary/.test(n.message)));
+  assert.ok(h.notices.some(n => /uses Pi's built-in summary/.test(n.message)));
   // Pi's summary fails too: the note comes back uncompacted and the tools are unlocked.
   await h.emit('session_compact_failed', { reason: 'manual', aborted: false, errorMessage: 'provider down' });
   assert.equal(state().locked, false);
@@ -152,6 +152,86 @@ test('P1: compaction that keeps failing falls back to Pi\'s summary, then return
   await h.emit('session_compact', { reason: 'threshold' });
   await h.emit('turn_end');
   assert.equal((await h.emit('tool_call', { toolName: 'read' })).block, true, 'the lock re-arms once a compaction succeeded');
+});
+
+test('P1: the in-run handoff commits the compaction and the note, and re-arms after a give-up', async t => {
+  const h = await host(t);
+  h.usage(120000);
+  await h.emit('turn_end');
+  await h.execute();
+  const settle = () => h.emit('agent_before_settle', { entries: [], continue: false, outcome: 'completed' });
+  const state = () => h.entries.filter(entry => entry.customType === 'self-compact-state').at(-1).data;
+  const result = await settle();
+  assert.equal(result.continue, true);
+  assert.deepEqual(result.entries.map(e => e.type), ['compaction', 'custom_message']);
+  assert.equal(result.entries[1].content, 'NEXT ACTION: continue');
+  assert.equal(state().handoff.status, 'ready');
+  assert.equal(state().locked, false);
+  assert.equal(await settle(), undefined, 'a delivered note is not compacted again');
+});
+
+test('P1: a failed in-run handoff is retried once idle, and leaves the last attempt to that path', async t => {
+  const h = await host(t);
+  h.usage(120000);
+  await h.emit('turn_end');
+  await h.execute();
+  h.prompt('COMPACTION_MESSAGE', '  ');
+  const settle = () => h.emit('agent_before_settle', { entries: [], continue: false, outcome: 'completed' });
+  const state = () => h.entries.filter(entry => entry.customType === 'self-compact-state').at(-1).data;
+  assert.equal(await settle(), undefined);
+  assert.equal(state().handoff.status, 'failed');
+  await h.emit('agent_settled');
+  assert.equal(h.compactions.length, 1, 'the idle retry started');
+  await h.emit('session_compact_failed', { reason: 'manual', aborted: true });
+  assert.equal(state().handoff.attempts, 2);
+  assert.equal(await settle(), undefined, 'the in-run path skips the last attempt');
+  assert.equal(state().handoff.attempts, 2, 'and does not use it up');
+});
+
+test('P1: a successful in-run handoff after a give-up re-arms the lock and guidance', async t => {
+  const h = await host(t);
+  h.usage(120000);
+  await h.emit('turn_end');
+  await h.execute();
+  h.prompt('COMPACTION_MESSAGE', '  ');
+  await h.emit('agent_before_settle', { entries: [], continue: false, outcome: 'completed' });
+  await h.emit('agent_settled');
+  await h.emit('session_compact_failed', { reason: 'manual', aborted: true });
+  await h.emit('agent_settled');
+  await h.emit('session_before_compact', summaryEvent());
+  await h.emit('session_compact_failed', { reason: 'manual', aborted: false, errorMessage: 'provider down' });
+  const given = h.messages.filter(m => m.customType === 'self-compact-handoff').at(-1);
+  await h.emit('message_end', { message: { role: 'custom', customType: 'self-compact-handoff', details: given.details } });
+  await h.emit('turn_end');
+  assert.equal(await h.emit('tool_call', { toolName: 'read' }), undefined, 'standing down after the give-up');
+  // The summarizer works again, and the agent hands off on its own.
+  h.prompt('COMPACTION_MESSAGE', 'Summarize.');
+  await h.execute('NEXT ACTION: second');
+  const result = await h.emit('agent_before_settle', { entries: [], continue: false, outcome: 'completed' });
+  assert.equal(result.continue, true);
+  // Pi commits the drafts to the branch, then the model answers the note.
+  h.entries.push(...result.entries.map((draft, i) => ({ ...draft, id: `committed-${i}` })));
+  await h.emit('message_end', { message: { role: 'assistant', content: [] } });
+  // The work goes on until the context is past the hard cutoff again.
+  h.entries.push(...seedEntries().map(entry => ({ ...entry, id: `after-${entry.id}` })));
+  await h.emit('turn_end');
+  assert.equal((await h.emit('tool_call', { toolName: 'read' })).block, true, 'the lock re-arms after the in-run success');
+});
+
+test('P1: a note that only waits to be read lets Pi\'s automatic compaction through and keeps the tools unlocked', async t => {
+  const h = await host(t);
+  h.usage(120000);
+  await h.emit('turn_end');
+  await h.execute();
+  await h.emit('agent_before_settle', { entries: [], continue: false, outcome: 'completed' });
+  const state = () => h.entries.filter(entry => entry.customType === 'self-compact-state').at(-1).data;
+  assert.equal(state().handoff.status, 'ready');
+  const cycle = state().cycle;
+  const result = await h.emit('session_before_compact', summaryEvent({ reason: 'threshold' }));
+  assert.notEqual(result?.cancel, true);
+  assert.equal(state().locked, false);
+  await h.emit('session_compact', { reason: 'threshold' });
+  assert.equal(state().cycle, cycle, 'a compaction that did not carry the note does not count as a cycle');
 });
 
 test('P1: final-answer crossing requests one follow-up, soft advice does not', async t => {

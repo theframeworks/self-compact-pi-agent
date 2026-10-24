@@ -46,7 +46,7 @@ just demo         # zero-cost scripted model walks every threshold end to end
 
 ### Manual Install
 
-**Prereqs:** [Pi coding agent](https://pi.dev) v0.85.1, [Node](https://nodejs.org) 24+, [just](https://github.com/casey/just), and a provider key in `.env` (`OPENROUTER_API_KEY` recommended, see [`.env.sample`](.env.sample); only live runs need it).
+**Prereqs:** [Pi coding agent](https://pi.dev) v1.3.0, [Node](https://nodejs.org) 24+, [just](https://github.com/casey/just), and a provider key in `.env` (`OPENROUTER_API_KEY` recommended, see [`.env.sample`](.env.sample); only live runs need it).
 
 ```bash
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent   # Pi
@@ -92,7 +92,7 @@ The fix is to hand the agent the gauge and the hand-off. **Thresholds it can see
 | **forced** | usage crosses warning + `--compact-buffer` (capped at 90 %) | every tool call is blocked with a reason naming `self_compact` | **only `self_compact`** |
 | **handoff** | agent calls `self_compact({ note_to_self })` | note saved, turn ends, compaction before the run settles, note returned verbatim in the same run | restored on success |
 
-The guidance never enters the model's persisted context: it is injected into the next model call and dropped. Each crossing prints the full notice, warning, or forced message once in the terminal so you see exactly what the agent sees. The footer is yours, not the model's: `view_context` gives the agent the same numbers (used tokens, percent, thresholds, tokens left) as JSON whenever it asks, so it never has to guess where it stands. The only messages that persist are your prompts and the returned note. If compaction fails or is cancelled, the note and the lock survive, the extension retries, and `/self-compact-now` or `/compact` finish the job. Reload, resume, and `/tree` rebuild the handoff from the session, and an answered handoff never restarts.
+The guidance never enters the model's persisted context: it is injected into the next model call and dropped. Each crossing prints the full notice, warning, or forced message once in the terminal so you see exactly what the agent sees. The footer is yours, not the model's: `view_context` gives the agent the same numbers (used tokens, percent, thresholds, tokens left) as JSON whenever it asks, so it never has to guess where it stands. The only messages that persist are your prompts and the returned note. If compaction fails, the note and the lock survive while the extension retries, the last time with Pi's built-in summary; if that fails too, the note comes back uncompacted and the tools unlock. If compaction is cancelled, the note and the lock survive until `/self-compact-now` or `/compact` finish the job. The one exception is the compaction at the end of the turn: Pi gives it no way to be cancelled, so stopping the agent waits for the summary, keeps the compaction and the note, and the work resumes from the note on the next prompt or reload. Reload, resume, and `/tree` rebuild the handoff from the session, and an answered handoff never restarts.
 
 > *The note is the contract. Content in, content out, byte for byte.*
 

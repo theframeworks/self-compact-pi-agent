@@ -40,7 +40,7 @@ test("compaction that keeps failing falls back to Pi's summary, then returns the
 		await client.waitFor((e) => e.type === "tool_execution_end" && e.toolName === "write" && e.isError === false, 30_000, { since: client.events.indexOf(handoff) });
 		const events = client.events;
 		assert.ok(notifies(events, /Summary generation failed after 2 attempts: .*fake summary failure/).length >= 2, "our summary was tried in the turn and once idle");
-		assert.equal(notifies(events, /Falling back to Pi's built-in summary/).length, 1, "the last attempt used Pi's summary");
+		assert.equal(notifies(events, /uses Pi's built-in summary/).length, 1, "the last attempt used Pi's summary");
 		assert.equal(notifies(events, /Returning the note without compacting and restoring tools/).length, 1);
 		assert.equal(eventsOfType(events, "compaction_end").filter((e) => e.aborted === false && !e.errorMessage).length, 0, "nothing was compacted");
 		assert.equal(messageText(handoff.message), traceNotes(t.traceFile).pop(), "the note came back verbatim");
