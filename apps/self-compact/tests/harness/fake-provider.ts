@@ -199,7 +199,22 @@ function decide(context: Context): Plan {
 	};
 }
 
-function streamScripted(model: Model<any>, context: Context, options?: SimpleStreamOptions) {
+/**
+ * Pi 1.3 sends the system prompt and the tool definitions as system messages at the head of the
+ * transcript instead of as `systemPrompt` and `tools`; fold them back so the script sees one shape.
+ */
+function normalize(context: Context): Context {
+	const system = context.messages.filter((m) => (m as { role: string }).role === "system") as unknown as Array<{ content?: unknown; toolsAdded?: unknown[] }>;
+	if (system.length === 0) return context;
+	return {
+		systemPrompt: context.systemPrompt ?? system.map((m) => textOf(m.content)).join("\n"),
+		tools: [...(context.tools ?? []), ...(system.flatMap((m) => m.toolsAdded ?? []) as NonNullable<Context["tools"]>)],
+		messages: context.messages.filter((m) => (m as { role: string }).role !== "system"),
+	};
+}
+
+function streamScripted(model: Model<any>, raw: Context, options?: SimpleStreamOptions) {
+	const context = normalize(raw);
 	const stream = createAssistantMessageEventStream();
 	const output: AssistantMessage = {
 		role: "assistant",

@@ -20,7 +20,7 @@ async function info(client: RpcClient): Promise<{ text: string; events: RpcEvent
 test("launch 1: defaults on a 1M model resolve to 100k / 200k / 300k (10% / 20% / 30%); info starts no LLM turn", async () => {
 	const t = makeTestDir("launch-defaults");
 	const client = new RpcClient({
-		args: scriptedArgs(t, ["--model", "anthropic/claude-sonnet-4-5"]),
+		args: scriptedArgs(t, ["--model", "anthropic/claude-sonnet-4-6"]),
 		cwd: t.dir,
 		env: DEFAULT_FAKE_ENV,
 		logFile: t.logFile,
@@ -43,7 +43,7 @@ test("launch 1: defaults on a 1M model resolve to 100k / 200k / 300k (10% / 20% 
 test("launch 2: 100k / 200k / 50k on a 1M model -> 10% / 20% / 25% markers", async () => {
 	const t = makeTestDir("launch-tokens");
 	const client = new RpcClient({
-		args: scriptedArgs(t, ["--model", "anthropic/claude-sonnet-4-5", "--compact-soft-at", "100k", "--compact-at", "200k", "--compact-buffer", "50k"]),
+		args: scriptedArgs(t, ["--model", "anthropic/claude-sonnet-4-6", "--compact-soft-at", "100k", "--compact-at", "200k", "--compact-buffer", "50k"]),
 		cwd: t.dir,
 		env: DEFAULT_FAKE_ENV,
 		logFile: t.logFile,

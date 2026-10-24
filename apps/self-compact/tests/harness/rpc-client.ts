@@ -3,7 +3,11 @@
  */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdirSync, appendFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import { VERIFICATION_DIR } from "./env.ts";
+
+/** An empty Pi config directory, so the user's own settings (selfCompact thresholds, packages) never reach a test. */
+const AGENT_DIR = join(VERIFICATION_DIR, "agent-home");
 
 export interface RpcEvent {
 	type: string;
@@ -31,9 +35,10 @@ export class RpcClient {
 	constructor(options: RpcClientOptions) {
 		this.options = options;
 		if (options.logFile) mkdirSync(dirname(options.logFile), { recursive: true });
+		mkdirSync(AGENT_DIR, { recursive: true });
 		this.proc = spawn("pi", ["--mode", "rpc", ...options.args], {
 			cwd: options.cwd,
-			env: { ...process.env, PI_SKIP_VERSION_CHECK: "1", PI_OFFLINE: "1", ...options.env },
+			env: { ...process.env, PI_SKIP_VERSION_CHECK: "1", PI_OFFLINE: "1", PI_CODING_AGENT_DIR: AGENT_DIR, ...options.env },
 			stdio: ["pipe", "pipe", "pipe"],
 		});
 		this.proc.stdout.setEncoding("utf8");
