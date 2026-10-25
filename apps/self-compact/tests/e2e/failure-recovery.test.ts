@@ -1,8 +1,8 @@
 /**
  * Failure and recovery: a failing summarizer keeps the note and the lock while retries remain,
  * /self-compact-now includes the saved note verbatim, a restart with --session restores the handoff
- * and finishes it once the summarizer works again, and when every attempt fails the note comes back
- * uncompacted so the work goes on.
+ * and finishes it once the summarizer works again, and when every attempt fails with lockTools off the note
+ * comes back uncompacted so the work goes on.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -27,11 +27,14 @@ function traceNotes(traceFile: string): string[] {
 }
 
 test("compaction that keeps failing falls back to Pi's summary, then returns the note uncompacted and the work goes on", async () => {
-	const t = makeTestDir("failure-give-up");
+	// lockTools off asks for availability over the cutoff: every attempt fails, so the note comes back uncompacted.
+	const t = makeTestDir("failure-give-up", { selfCompact: { lockTools: false } });
 	const client = new RpcClient({
 		args: scriptedArgs(t, PERCENT_FLAGS),
 		cwd: t.dir,
-		env: { ...DEFAULT_FAKE_ENV, SC_FAKE_SCENARIO: "ignore-until-forced", SC_FAKE_TRACE: t.traceFile, SC_FAKE_SUMMARY_FAIL: "99" },
+		// The script obeys the warning itself: with lockTools off nothing is blocked, so only a cooperative model
+		// reaches the give-up path.
+		env: { ...DEFAULT_FAKE_ENV, SC_FAKE_SCENARIO: "obey-warning", SC_FAKE_TRACE: t.traceFile, SC_FAKE_SUMMARY_FAIL: "99" },
 		logFile: t.logFile,
 	});
 	try {

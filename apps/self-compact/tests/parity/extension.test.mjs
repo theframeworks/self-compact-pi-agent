@@ -130,7 +130,8 @@ test('P1: automatic compaction cannot bypass the note, including before settleme
 });
 
 test('P1: compaction that keeps failing falls back to Pi\'s summary, then returns the note uncompacted', async t => {
-  const h = await host(t);
+  // lockTools off is the operator saying the run matters more than the cutoff.
+  const h = await host(t, {}, { compaction: { keepRecentTokens: 100 }, selfCompact: { lockTools: false } });
   h.usage(120000);
   await h.emit('turn_end');
   await h.execute();
@@ -161,6 +162,41 @@ test('P1: compaction that keeps failing falls back to Pi\'s summary, then return
   assert.equal(await h.emit('tool_call', { toolName: 'read' }), undefined);
   assert.equal((await h.emit('context', { messages: [] })).messages.length, 0);
   await h.emit('session_compact', { reason: 'threshold' });
+  await h.emit('turn_end');
+  assert.equal(await h.emit('tool_call', { toolName: 'read' }), undefined, 'lockTools off: the cutoff no longer blocks after a give-up');
+});
+
+test('P1: with lockTools on, a summarizer that fails every way stops the session instead of sliding past the cutoff', async t => {
+  // The shipped default: the lock is the contract, so a session that cannot compact does not keep working.
+  const h = await host(t);
+  h.usage(120000);
+  await h.emit('turn_end');
+  await h.execute();
+  h.prompt('COMPACTION_MESSAGE', '  ');
+  const state = () => h.entries.filter(entry => entry.customType === 'self-compact-state').at(-1).data;
+  for (const attempt of [1, 2]) {
+    await h.emit('agent_settled');
+    assert.deepEqual(await h.emit('session_before_compact', summaryEvent()), { cancel: true }, `attempt ${attempt}`);
+    await h.emit('session_compact_failed', { reason: 'manual', aborted: true });
+    assert.equal(state().handoff.attempts, attempt);
+  }
+  await h.emit('agent_settled');
+  assert.equal(await h.emit('session_before_compact', summaryEvent()), undefined, 'the last attempt is Pi\'s summary');
+  await h.emit('session_compact_failed', { reason: 'manual', aborted: false, errorMessage: 'provider down' });
+  assert.equal(state().locked, true, 'the tools stay locked');
+  assert.equal(state().handoff.status, 'failed', 'the note is kept for a retry');
+  assert.ok(h.notices.some(n => /Tools stay locked \(selfCompact\.lockTools\)/.test(n.message)), 'and it says why');
+  assert.equal(h.messages.filter(m => m.customType === 'self-compact-handoff').length, 0, 'the note is not returned');
+  assert.equal((await h.emit('tool_call', { toolName: 'read' })).block, true, 'no work continues past the cutoff');
+  assert.equal(await h.emit('tool_call', { toolName: 'self_compact' }), undefined, 'retrying the handoff always is');
+  // A compaction that finally succeeds through another path releases the lock and returns the note.
+  await h.emit('session_compact', { reason: 'threshold' });
+  assert.equal(state().locked, false);
+  assert.equal(state().handoff.status, 'ready');
+  const returned = h.messages.filter(m => m.customType === 'self-compact-handoff');
+  assert.equal(returned.length, 1);
+  // The model reads the note, and past the cutoff again the lock is the contract once more.
+  await h.emit('message_end', { message: { role: 'custom', customType: 'self-compact-handoff', details: returned[0].details } });
   await h.emit('turn_end');
   assert.equal((await h.emit('tool_call', { toolName: 'read' })).block, true, 'the lock re-arms once a compaction succeeded');
 });
@@ -222,8 +258,8 @@ test('P1: a failed in-run handoff is retried once idle, and leaves the last atte
   assert.equal(state().handoff.attempts, 2, 'and does not use it up');
 });
 
-test('P1: a successful in-run handoff after a give-up re-arms the lock and guidance', async t => {
-  const h = await host(t);
+test('P1: a successful in-run handoff after a give-up re-arms the guidance', async t => {
+  const h = await host(t, {}, { compaction: { keepRecentTokens: 100 }, selfCompact: { lockTools: false } });
   h.usage(120000);
   await h.emit('turn_end');
   await h.execute();
@@ -249,7 +285,7 @@ test('P1: a successful in-run handoff after a give-up re-arms the lock and guida
   // The work goes on until the context is past the hard cutoff again.
   h.entries.push(...seedEntries().map(entry => ({ ...entry, id: `after-${entry.id}` })));
   await h.emit('turn_end');
-  assert.equal((await h.emit('tool_call', { toolName: 'read' })).block, true, 'the lock re-arms after the in-run success');
+  assert.ok((await h.emit('context', { messages: [] })).messages.length > 0, 'the guidance re-arms after the in-run success');
 });
 
 test('P1: a note that only waits to be read lets Pi\'s automatic compaction through and keeps the tools unlocked', async t => {

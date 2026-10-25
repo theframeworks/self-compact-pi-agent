@@ -18,8 +18,10 @@
  *   it is retried once the agent is idle and the note then starts the next run. When Pi would find nothing to
  *   compact (the session fits inside keepRecentTokens) the tool refuses instead of saving a note and locking.
  * - Failure or cancellation keeps the note and the lock; retries, /self-compact-now, reload and /tree recovery. The last
- *   automatic retry uses Pi's built-in summary. If that fails too, the note is returned uncompacted and the tools are
- *   unlocked; the lock and guidance stand down until a compaction succeeds, leaving the context to Pi's own compaction.
+ *   automatic retry uses Pi's built-in summary. If that fails too, `lockTools` decides: on, the tools stay locked and the
+ *   session stops at the cutoff with the note saved (retry with self_compact, /compact or a reload); off, the note is
+ *   returned uncompacted, the tools unlock, and the lock and guidance stand down until a compaction succeeds, leaving the
+ *   context to Pi's own compaction.
  * - Pi's automatic compaction (threshold or overflow) is cancelled while a note is saved, since the note brings its own.
  *   Without a note it is the backstop for a model that never handed off, and goes ahead with the replacement summary
  *   prompt (or Pi's built-in one if that fails).
@@ -1112,15 +1114,22 @@ export default function selfCompact(pi: ExtensionAPI) {
 			notify(ctx, `self-compact: compaction failed (attempt ${current.attempts}): ${current.error}. Note kept, tools stay locked, retrying automatically.`, "warning");
 			scheduleRetry(ctx);
 		} else if (ours || !event.aborted) {
-			// Every way of compacting failed. Keeping the tools locked would stop the agent for good: return the note
-			// uncompacted, unlock, and leave the context to Pi's automatic compaction.
-			R.standingDown = true;
-			R.state.handoff = { ...current, status: "ready" };
-			setLocked(false);
-			save();
-			refreshUi(ctx);
-			notify(ctx, `self-compact: compaction failed ${current.attempts} times: ${current.error}. Returning the note without compacting and restoring tools; Pi's automatic compaction takes over when the window fills.`, "error");
-			deliverHandoff(ctx);
+			if (R.settings.lockTools) {
+				// lockTools holds the line: the lock is released only by a successful compaction, so a summarizer that
+				// fails every way means a stop rather than a slide past the cutoff. Nothing is lost — the note is saved
+				// and self_compact, /compact or a reload retries it — so this is the operator's call, not the failure's.
+				notify(ctx, `self-compact: compaction failed ${current.attempts} times: ${current.error}. Tools stay locked (selfCompact.lockTools): the note is saved, so retry it with ${TOOL_NAME}, /compact, or a reload once the summary provider works.`, "error");
+			} else {
+				// Every way of compacting failed and the operator has not asked to be held at the cutoff: return the note
+				// uncompacted, unlock, and leave the context to Pi's automatic compaction.
+				R.standingDown = true;
+				R.state.handoff = { ...current, status: "ready" };
+				setLocked(false);
+				save();
+				refreshUi(ctx);
+				notify(ctx, `self-compact: compaction failed ${current.attempts} times: ${current.error}. Returning the note without compacting and restoring tools; Pi's automatic compaction takes over when the window fills.`, "error");
+				deliverHandoff(ctx);
+			}
 		} else {
 			notify(ctx, `self-compact: compaction cancelled (attempt ${current.attempts}): ${current.error}. Note kept and tools stay locked. Run /self-compact-now or /compact to retry.`, "error");
 		}

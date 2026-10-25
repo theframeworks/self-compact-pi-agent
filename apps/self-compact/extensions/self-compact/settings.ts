@@ -27,13 +27,12 @@ export interface SelfCompactSettings {
 	/**
 	 * Block every tool except self_compact at the hard cutoff.
 	 *
-	 * On by default, and the only setting here that can strand a session. It is safe
-	 * only while summary generation can be trusted to finish: at the cutoff with the
-	 * lock on and the summarizer failing, the retry cannot succeed, so every other
-	 * tool stays blocked and nothing reaches the point where the lock is released.
-	 * Turn it off when running a Pi version whose summary input this extension has
-	 * not been checked against. The thresholds, the phase tag and the guidance
-	 * messages keep working; they just stop being enforced.
+	 * On by default, and the only setting here that can strand a session, so it also decides what a summarizer that
+	 * fails every way does: with the lock on, a session that cannot compact stops at the cutoff with its note saved;
+	 * with it off, the note comes back uncompacted and the tools unlock, and the context is left to Pi's own
+	 * compaction. Turn it off when running a Pi version whose summary input this extension has not been checked
+	 * against, or when an outage must not stop a run. The thresholds, the phase tag and the guidance messages keep
+	 * working either way; they just stop being enforced.
 	 */
 	lockTools: boolean;
 	/**
