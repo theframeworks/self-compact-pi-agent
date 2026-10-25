@@ -8,6 +8,7 @@ import {
 	SettingsManager,
 	type CompactionEntry,
 	type ExtensionContext,
+	type ProjectedSessionEntry,
 	type SessionBeforeCompactEvent,
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
@@ -50,9 +51,9 @@ interface CutPlan {
 }
 
 /**
- * Where a compaction of this branch would cut, the way Pi's prepareCompaction() finds it. Undefined when the last
- * entry is already a compaction. Pi doesn't export prepareCompaction(), so this walks the raw branch with the
- * exported findCutPoint(); Pi walks the session projection, which differs only after context edits.
+ * Where a compaction of these entries would cut, the way Pi's prepareCompaction() finds it. Undefined when the last
+ * entry is already a compaction. Pi doesn't export prepareCompaction(), so this uses the exported findCutPoint();
+ * Pi walks the session projection, so callers pass projected entries (see prepareHandoffCompaction).
  */
 function planCut(entries: SessionEntry[], keepRecentTokens: number): CutPlan | undefined {
 	if (entries.length === 0 || entries[entries.length - 1]!.type === "compaction") return undefined;
@@ -92,8 +93,15 @@ export function hasCompactionMaterial(entries: SessionEntry[], keepRecentTokens:
  * The compaction a handoff commits inside the run that saved the note, prepared as Pi's prepareCompaction() would.
  * Undefined when there is nothing to compact. tokensBefore is left at 0: compact() only copies it into its result,
  * which the boundary entry doesn't carry, and Pi computes it when it appends the entry.
+ *
+ * Takes the boundary's projected entries, not the raw branch: after a context edit an entry's model-visible messages
+ * are not the ones on disk, so the cut can only be found on the projection. findCutPoint() still reads the source
+ * entries, which is why a projection carrying a context edit is left to the idle path (Pi's own prepareCompaction)
+ * rather than cutting in the wrong place.
  */
-export function prepareHandoffCompaction(entries: SessionEntry[], settings: CompactionSettings): Preparation | undefined {
+export function prepareHandoffCompaction(projection: ProjectedSessionEntry[], settings: CompactionSettings): Preparation | undefined {
+	if (projection.some((entry) => entry.sourceEntry.type === "context_edit")) return undefined;
+	const entries = projection.map((entry) => entry.sourceEntry);
 	const plan = planCut(entries, settings.keepRecentTokens);
 	const firstKeptEntryId = plan && entries[plan.firstKeptEntryIndex]?.id;
 	if (!plan || !firstKeptEntryId) return undefined;

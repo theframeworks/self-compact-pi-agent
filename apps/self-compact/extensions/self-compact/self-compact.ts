@@ -1043,7 +1043,9 @@ export default function selfCompact(pi: ExtensionAPI) {
 		if (!R.alive || inert() || event.outcome === "aborted" || !ctx.model) return undefined;
 		const h = activeHandoff();
 		if (!h || (h.status !== "pending" && h.status !== "failed") || h.attempts >= LAST_ATTEMPT) return undefined;
-		const preparation = prepareHandoffCompaction(ctx.sessionManager.getBranch(), compactionSettings(ctx.cwd, ctx.model));
+		// The projection Pi would compact, not the raw branch: after a context edit they differ. Pi commits the entries
+		// this returns without emitting session_compact, so nothing else would catch a cut made in the wrong place.
+		const preparation = prepareHandoffCompaction(event.context.contextEntries, compactionSettings(ctx.cwd, ctx.model));
 		if (!preparation) return undefined;
 		R.compactionInFlight = true;
 		R.state.handoff = { ...h, status: "compacting" };

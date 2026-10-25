@@ -54,9 +54,20 @@ async function host(t, flags = {}, settings = { compaction: { keepRecentTokens: 
       return { role: 'assistant', api: 'openai-completions', provider: 'fake', model: 'parity-model', timestamp: 1, stopReason: 'stop', content: [{ type: 'text', text: 'Verified summary.' }], usage: { input: 10, output: 10, totalTokens: 20, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
     } },
   };
+  // The projection Pi hands a boundary hook: the entries, each with the messages the model would see.
+  const projection = () => entries.map(entry => ({
+    sourceEntry: entry,
+    messages: entry.type === 'message' ? [entry.message]
+      : entry.type === 'custom_message' ? [{ role: 'custom', ...entry }]
+        : [],
+  }));
   const emit = async (name, event = {}) => {
+    // Boundary hooks are handed Pi's proposed state, projection included; a test may override it.
+    const payload = name === 'agent_before_settle' || name === 'turn_end'
+      ? { entries: [], continue: false, outcome: 'completed', context: { contextEntries: projection(), contextMessages: [], llmMessages: [], pendingMessages: [], canContinue: false }, ...event }
+      : event;
     let result;
-    for (const handler of extension.handlers.get(name) ?? []) result = await handler(event, ctx);
+    for (const handler of extension.handlers.get(name) ?? []) result = await handler(payload, ctx);
     return result;
   };
   t.after(async () => { await emit('session_shutdown'); rmSync(cwd, { recursive: true, force: true }); });
@@ -168,6 +179,29 @@ test('P1: the in-run handoff commits the compaction and the note, and re-arms af
   assert.equal(state().handoff.status, 'ready');
   assert.equal(state().locked, false);
   assert.equal(await settle(), undefined, 'a delivered note is not compacted again');
+});
+
+test('P1: a projection carrying a context edit is left to Pi\'s own preparation', async t => {
+  const h = await host(t);
+  h.usage(120000);
+  await h.emit('turn_end');
+  await h.execute();
+  const state = () => h.entries.filter(entry => entry.customType === 'self-compact-state').at(-1).data;
+  const edited = {
+    entries: [], continue: false, outcome: 'completed',
+    context: {
+      // Pi cuts a context-edited projection, which findCutPoint() over the raw branch cannot see, so the
+      // in-run path stands down rather than commit a compaction whose kept tail disagrees with the summary.
+      contextEntries: [
+        { sourceEntry: { type: 'message', id: 'seed-1', parentId: null, timestamp: '2026-01-01T00:00:00.000Z', message: { role: 'user', content: 'keep working', timestamp: 1 } }, messages: [{ role: 'user', content: 'keep working', timestamp: 1 }] },
+        { sourceEntry: { type: 'context_edit', id: 'edit-1', parentId: 'seed-1', timestamp: '2026-01-01T00:00:01.000Z', targetId: 'seed-1', replacement: null }, messages: [] },
+      ],
+      contextMessages: [], llmMessages: [], pendingMessages: [], canContinue: false,
+    },
+  };
+  assert.equal(await h.emit('agent_before_settle', edited), undefined);
+  assert.equal(state().handoff.status, 'pending', 'the note is kept for the idle path');
+  assert.equal(h.compactions.length, 0, 'and no compaction was committed in the run');
 });
 
 test('P1: a failed in-run handoff is retried once idle, and leaves the last attempt to that path', async t => {
