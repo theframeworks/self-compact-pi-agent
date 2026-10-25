@@ -5,8 +5,8 @@ project_root := justfile_directory()
 app := project_root + "/apps/self-compact"
 ext := app + "/extensions/self-compact/self-compact.ts"
 
-# Threshold overrides for `just run` (e.g. `just soft=5% warn=10% buffer=5% run`). Empty = the shipped defaults
-# in apps/self-compact/extensions/self-compact/defaults.ts (notice 10%, warning 20%, hard cutoff 30% of the window).
+# Threshold overrides for `just run` (e.g. `just soft=50k warn=70k buffer=20k run`). Empty = the shipped defaults
+# in apps/self-compact/extensions/self-compact/defaults.ts (notice 100k, warning 140k, hard cutoff 170k tokens).
 soft := ""
 warn := ""
 buffer := ""
@@ -17,7 +17,7 @@ real_model := env("SC_REAL_MODEL", "openrouter/deepseek/deepseek-v4.1-flash")
 default:
     @just --list
 
-# Run the self-compact Pi agent with the shipped defaults (notice 10%, warning 20%, hard cutoff 30% of the model window); extra args go to pi (e.g. --model openrouter/deepseek/deepseek-v4.1-flash).
+# Run the self-compact Pi agent with the shipped defaults (notice 100k, warning 140k, hard cutoff 170k tokens); extra args go to pi (e.g. --model openrouter/deepseek/deepseek-v4.1-flash).
 run *ARGS:
     pi -e "{{ext}}" {{ if soft != "" { "--compact-soft-at " + soft } else { "" } }} {{ if warn != "" { "--compact-at " + warn } else { "" } }} {{ if buffer != "" { "--compact-buffer " + buffer } else { "" } }} {{ARGS}}
 

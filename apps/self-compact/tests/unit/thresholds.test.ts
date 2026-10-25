@@ -32,17 +32,23 @@ test("parseTokenSpec rejects invalid values", () => {
 	}
 });
 
-test("shipped defaults are 10% / 20% / 30%: on a 1,000,000-token window they resolve to 100k / 200k / 300k", () => {
-	assert.deepEqual(DEFAULT_SPECS, { softAt: "10%", at: "20%", buffer: "10%" });
-	const t = resolveOk(DEFAULT_SPECS, MILLION, true);
-	assert.equal(t.softTokens, 100_000);
-	assert.equal(t.warnTokens, 200_000);
-	assert.equal(t.bufferTokens, 100_000);
-	assert.equal(t.forcedTokens, 300_000);
-	assert.equal(t.clamped, false);
+test("shipped defaults are 100k / 140k / 170k tokens, the same absolute lines on every model", () => {
+	assert.deepEqual(DEFAULT_SPECS, { softAt: "100k", at: "140k", buffer: "30k" });
+	for (const window of [MILLION, 272_000, 200_000]) {
+		const t = resolveOk(DEFAULT_SPECS, window, true);
+		assert.equal(t.softTokens, 100_000);
+		assert.equal(t.warnTokens, 140_000);
+		assert.equal(t.bufferTokens, 30_000);
+		assert.equal(t.forcedTokens, 170_000);
+		assert.equal(t.clamped, false, `no clamp on a ${window}-token window`);
+	}
+	// Below that the numbers cannot fit: they clamp to the 90% cap instead of rejecting, because being wrong
+	// about the window must never block every tool.
 	const small = resolveOk(DEFAULT_SPECS, 128_000, true);
-	assert.equal(small.forcedTokens, 38_400);
-	assert.equal(small.clamped, false);
+	assert.equal(small.softTokens, 100_000);
+	assert.equal(small.warnTokens, 115_200);
+	assert.equal(small.forcedTokens, 115_200);
+	assert.equal(small.clamped, true);
 });
 
 test("token launch 100k / 200k / 50k on 1M resolves to 100k / 200k / 250k (10% / 20% / 25%)", () => {

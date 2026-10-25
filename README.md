@@ -30,7 +30,7 @@ just run --model openrouter/deepseek/deepseek-v4.1-flash    # 2. launch Pi with 
 read every file in this code base in chunks of 10. Stop every 10 and ask for confirmation before moving to the next 10.
 ```
 
-Every chunk adds tens of thousands of tokens to the context. Watch the footer gauge climb past the `~` notice marker and the `!` warning marker, then see the agent write its `note_to_self`, call `self_compact`, and carry on from the returned note. The shipped defaults are notice 10%, warning 20%, hard cutoff 30% of the model window (see `apps/self-compact/extensions/self-compact/defaults.ts`); on a 1M-token model that is about 105k / 210k / 315k tokens. To reach a cycle sooner, lower them: `just soft=5% warn=8% buffer=2% run --model openrouter/deepseek/deepseek-v4.1-flash` (about 52k / 84k / 105k). Keep the notice line well above Pi's retained recent history (`keepRecentTokens`, 20k by default), otherwise a compaction has nothing to cut. Inside Pi, `/self-compact-info` prints the live numbers at any time, asking the agent to call `view_context` shows you what it sees, and `just demo` walks the whole cycle with a scripted model and no API key. If OpenRouter answers with 429 rate-limit errors for that model, any other Pi model id works the same way (`pi --list-models deepseek` lists the other DeepSeek flash slugs).
+Every chunk adds tens of thousands of tokens to the context. Watch the footer gauge climb past the `~` notice marker and the `!` warning marker, then see the agent write its `note_to_self`, call `self_compact`, and carry on from the returned note. The shipped defaults are absolute token lines — notice 100k, warning 140k, hard cutoff 170k (see `apps/self-compact/extensions/self-compact/defaults.ts`) — because quality decays with the number of tokens in context, not with the share of the window, so they mean the same thing on a 272k model and a 1M one. To reach a cycle sooner, lower them: `just soft=50k warn=70k buffer=20k run --model openrouter/deepseek/deepseek-v4.1-flash`. Keep the notice line well above Pi's retained recent history (`keepRecentTokens`, 20k by default), otherwise a compaction has nothing to cut. Inside Pi, `/self-compact-info` prints the live numbers at any time, asking the agent to call `view_context` shows you what it sees, and `just demo` walks the whole cycle with a scripted model and no API key. If OpenRouter answers with 429 rate-limit errors for that model, any other Pi model id works the same way (`pi --list-models deepseek` lists the other DeepSeek flash slugs).
 
 ---
 
@@ -51,7 +51,7 @@ just demo         # zero-cost scripted model walks every threshold end to end
 ```bash
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent   # Pi
 cp .env.sample .env                                                # add OPENROUTER_API_KEY; just loads .env on every recipe
-just run --model openrouter/deepseek/deepseek-v4.1-flash             # shipped defaults: notice 10%, warning 20%, hard cutoff 30%
+just run --model openrouter/deepseek/deepseek-v4.1-flash             # shipped defaults: notice 100k, warning 140k, hard cutoff 170k tokens
 just test && just e2e                                              # unit + deterministic end-to-end, no API cost
 ```
 
@@ -124,9 +124,9 @@ numbers itself:
 {
   "selfCompact": {
     "footer": false,
-    "softTokens": 160000,
-    "warnTokens": 200000,
-    "bufferTokens": 40000
+    "softTokens": 100000,
+    "warnTokens": 140000,
+    "bufferTokens": 30000
   }
 }
 ```
@@ -151,9 +151,9 @@ command line alike. A percentage moves with the model — 20% is 20k tokens of a
 100k window and 200k tokens of a 1m one — so the same number means a different
 amount of room on every model, and the cutoff that matters (where the session
 still has room to write a usable note) cannot be reasoned about across a model
-switch. In tokens, the three lines above read: notice at 160k, warning at 200k,
-and a hard cutoff at 240k. `warnTokens + bufferTokens` is the cutoff, exactly as
-`--compact-buffer` extends `--compact-at`.
+switch. The shipped defaults read: notice at 100k, warning at 140k, and a hard
+cutoff at 170k on every model. `warnTokens + bufferTokens` is the cutoff, exactly
+as `--compact-buffer` extends `--compact-at`.
 
 Those particular numbers are argued rather than picked: [Compaction Thresholds](docs/compaction-thresholds.md)
 collects the sources, including the finding that degradation onset tracks an
@@ -190,7 +190,7 @@ self-compact/
 ├─ apps/self-compact/                    # the extension (the only app)
 │   ├─ extensions/self-compact/
 │   │   ├─ self-compact.ts               # entry: flags, tool, commands, events, footer, compaction override
-│   │   ├─ defaults.ts                   # shipped thresholds: notice 10%, warning 20%, hard cutoff 30%
+│   │   ├─ defaults.ts                   # shipped thresholds: notice 100k, warning 140k, hard cutoff 170k
 │   │   ├─ thresholds.ts                 # tokens / k / m / % parsing, 90 % cap, level
 │   │   ├─ context-bar.ts                # 20-cell bar renderer
 │   │   ├─ prompts.ts                    # prompt lookup, templating, precedence
@@ -212,8 +212,8 @@ self-compact/
 ## Commands
 
 ```bash
-just run [pi flags]                    # shipped defaults: notice 10%, warning 20%, hard cutoff 30% of the model window
-just soft=5% warn=10% buffer=5% run    # same launch with lower thresholds
+just run [pi flags]                    # shipped defaults: notice 100k, warning 140k, hard cutoff 170k tokens
+just soft=50k warn=70k buffer=20k run  # same launch with lower thresholds
 just demo                              # scripted zero-cost model walks notice -> warning -> forced -> handoff
 just test                              # unit tests
 just e2e                               # deterministic end-to-end through the real pi CLI
@@ -227,9 +227,9 @@ Inside Pi: `/self-compact-info` (settings, thresholds, usage, state, cycles, pro
 
 | Line | Default | CLI flag |
 | --- | --- | --- |
-| notice | `10%` of the model window | `--compact-soft-at` |
-| warning | `20%` | `--compact-at` |
-| hard cutoff | `30%` (warning + buffer, capped at 90 %) | `--compact-buffer` (default `10%`) |
+| notice | `100k` tokens | `--compact-soft-at` |
+| warning | `140k` tokens | `--compact-at` |
+| hard cutoff | `170k` (warning + buffer, capped at 90 % of the window) | `--compact-buffer` (default `30k`) |
 
 Override any of them per launch without touching the file:
 

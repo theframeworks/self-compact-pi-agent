@@ -5,19 +5,19 @@ The Pi (v1.3.0) extension. The story, the demo, and the install steps are in the
 ## Run
 
 ```bash
-pi -e extensions/self-compact/self-compact.ts                                                  # shipped defaults: 10% / 20% / 30%
+pi -e extensions/self-compact/self-compact.ts                                                  # shipped defaults: 100k / 140k / 170k tokens
 pi -e extensions/self-compact/self-compact.ts --compact-soft-at 15% --compact-at 40% --compact-buffer 5%
 pi -e extensions/self-compact/self-compact.ts --compact-soft-at 100k --compact-at 200k --compact-buffer 50k
 ```
 
 | Flag | Meaning | Default |
 | --- | --- | --- |
-| `--compact-soft-at` | notice line: awareness only, nothing changes | `10%` |
-| `--compact-at` | warning line: time to write a note and compact soon | `20%` |
-| `--compact-buffer` | allowance above the warning before every other tool is blocked (`0` = block at the warning) | `10%` (hard cutoff 30%) |
+| `--compact-soft-at` | notice line: awareness only, nothing changes | `100k` tokens |
+| `--compact-at` | warning line: time to write a note and compact soon | `140k` tokens |
+| `--compact-buffer` | allowance above the warning before every other tool is blocked (`0` = block at the warning) | `30k` (hard cutoff 170k) |
 | `--compact-prompt` | literal text that replaces the compaction summary system prompt | unset |
 
-Values are percentages of the model window (`20%`) or token counts (`270000`, `100k`, `1.5m`). The hard cutoff is `min(warning + buffer, 90% of the window)`. Defaults live in `extensions/self-compact/defaults.ts`. Token counts that don't fit the current model (a warning above 90% of a smaller window, say) are clamped to fit, with a note. Settings that are wrong whatever the model (bad syntax, a percentage above 90%, soft above warning in the same units) are rejected: `/self-compact-info` reports the error and every tool is blocked until they are fixed.
+Values are token counts (`270000`, `100k`, `1.5m`) or, where a share of the window is what you mean, percentages of it (`20%`). The shipped defaults are absolute tokens because degradation onset tracks the number of tokens in context rather than the fraction of the window. The hard cutoff is `min(warning + buffer, 90% of the window)`. Defaults live in `extensions/self-compact/defaults.ts`. Token counts that don't fit the current model (a warning above 90% of a smaller window, say) are clamped to fit, with a note. Settings that are wrong whatever the model (bad syntax, a percentage above 90%, soft above warning in the same units) are rejected: `/self-compact-info` reports the error and every tool is blocked until they are fixed.
 
 ## Tools and commands
 
@@ -56,7 +56,7 @@ No npm dependencies: Pi's loader supplies its packages at runtime and Node 24 st
 ```
 extensions/self-compact/
   self-compact.ts   entry: flags, tools, commands, events, footer, handoff
-  defaults.ts       shipped thresholds (10% / 20% / 30%) and the 90% cap
+  defaults.ts       shipped thresholds (100k / 140k / 170k tokens) and the 90% cap
   thresholds.ts     parse (tokens / k / m / %), validate, resolve against the window, level
   context-bar.ts    20-cell bar renderer
   prompts.ts        prompt lookup, templating, precedence, built-in fallbacks

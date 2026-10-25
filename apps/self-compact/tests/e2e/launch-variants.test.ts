@@ -17,7 +17,7 @@ async function info(client: RpcClient): Promise<{ text: string; events: RpcEvent
 	return { text: String(notify.message), events: client.events.slice(since) };
 }
 
-test("launch 1: defaults on a 1M model resolve to 100k / 200k / 300k (10% / 20% / 30%); info starts no LLM turn", async () => {
+test("launch 1: defaults are 100k / 140k / 170k tokens, the same lines on a 1M model; info starts no LLM turn", async () => {
 	const t = makeTestDir("launch-defaults");
 	const client = new RpcClient({
 		args: scriptedArgs(t, ["--model", "anthropic/claude-sonnet-4-6"]),
@@ -27,9 +27,9 @@ test("launch 1: defaults on a 1M model resolve to 100k / 200k / 300k (10% / 20% 
 	});
 	try {
 		const { text, events } = await info(client);
-		assert.match(text, /--compact-soft-at 10% \(default\), --compact-at 20% \(default\), --compact-buffer 10% \(default\), --compact-prompt unset/);
+		assert.match(text, /--compact-soft-at 100k \(default\), --compact-at 140k \(default\), --compact-buffer 30k \(default\), --compact-prompt unset/);
 		assert.match(text, /window 1,000,000 tokens, cap 900,000/);
-		assert.match(text, /resolved: soft 100,000 \(10\.0%\), warning 200,000 \(20\.0%\), buffer 100,000, forced 300,000 \(30\.0%\)/);
+		assert.match(text, /resolved: soft 100,000 \(10\.0%\), warning 140,000 \(14\.0%\), buffer 30,000, forced 170,000 \(17\.0%\)/);
 		assert.match(text, /prompts: soft .*USER_PROMPT_SOFT_SELF_COMPACT\.md \(\d+ chars\), warning .*USER_PROMPT_WARNING_SELF_COMPACT\.md \(\d+ chars\), compaction .*USER_PROMPT_COMPACTION_MESSAGE\.md \(\d+ chars\)/);
 		assert.match(text, /state: level (idle|unknown), tools unlocked, handoff none, attempts 0/);
 		assert.match(text, /cycles completed: 0/);

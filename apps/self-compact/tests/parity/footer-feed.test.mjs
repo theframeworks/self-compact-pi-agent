@@ -184,8 +184,8 @@ test('F9: a mistyped setting falls back to the default rather than breaking the 
   const h = await host(t, { settings: { selfCompact: { softTokens: '60k', warnTokens: '120k' } }, tokens: 130000 });
   const feed = h.feeds.at(-1);
   assert.ok(feed, 'the extension still resolves and publishes');
-  // The shipped defaults on a 200k window: 10%, 20% and a 10% buffer.
-  assert.equal(feed.softTokens, 20000);
-  assert.equal(feed.warnTokens, 40000);
-  assert.equal(feed.forcedTokens, 60000);
+  // The shipped defaults on a 200k window: absolute token lines, so 100k / 140k and a 30k buffer.
+  assert.equal(feed.softTokens, 100000);
+  assert.equal(feed.warnTokens, 140000);
+  assert.equal(feed.forcedTokens, 170000);
 });
