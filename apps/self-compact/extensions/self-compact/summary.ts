@@ -98,10 +98,14 @@ export function hasCompactionMaterial(entries: SessionEntry[], keepRecentTokens:
  * are not the ones on disk, so the cut can only be found on the projection. findCutPoint() still reads the source
  * entries, which is why a projection carrying a context edit is left to the idle path (Pi's own prepareCompaction)
  * rather than cutting in the wrong place.
+ *
+ * The projection starts with the newest compaction and then its kept entries, which can include an older compaction
+ * whose summary the newest one already replaced. Pi projects that older entry as nothing, so it is dropped here too;
+ * left in, planCut() would take it for the previous compaction and summarize from the wrong boundary.
  */
 export function prepareHandoffCompaction(projection: ProjectedSessionEntry[], settings: CompactionSettings): Preparation | undefined {
 	if (projection.some((entry) => entry.sourceEntry.type === "context_edit")) return undefined;
-	const entries = projection.map((entry) => entry.sourceEntry);
+	const entries = projection.filter((entry, i) => i === 0 || entry.sourceEntry.type !== "compaction").map((entry) => entry.sourceEntry);
 	const plan = planCut(entries, settings.keepRecentTokens);
 	const firstKeptEntryId = plan && entries[plan.firstKeptEntryIndex]?.id;
 	if (!plan || !firstKeptEntryId) return undefined;

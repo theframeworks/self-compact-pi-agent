@@ -217,6 +217,33 @@ test('P1: the in-run handoff commits the compaction and the note, and re-arms af
   assert.equal(await settle(), undefined, 'a delivered note is not compacted again');
 });
 
+test('P1: the in-run handoff builds on the newest compaction, not an older one kept in its tail', async t => {
+  const h = await host(t);
+  h.usage(120000);
+  await h.emit('turn_end');
+  await h.execute();
+  const [first, answer] = seedEntries();
+  const [next, nextAnswer, current] = seedEntries().map(entry => ({ ...entry, id: `next-${entry.id}` }));
+  const compaction = (id, summary, firstKeptEntryId) => ({ type: 'compaction', id, parentId: null, timestamp: '2026-01-01T00:00:00.000Z', summary, firstKeptEntryId, tokensBefore: 1000 });
+  // Pi's projection: the newest compaction first, then its kept entries, where an older compaction whose id lies
+  // inside the kept range is retained but projected as nothing.
+  const contextEntries = [
+    { sourceEntry: compaction('c-new', 'NEWEST-SUMMARY', first.id), messages: [{ role: 'compactionSummary', summary: 'NEWEST-SUMMARY', tokensBefore: 1000, timestamp: 1 }] },
+    { sourceEntry: first, messages: [first.message] },
+    { sourceEntry: compaction('c-old', 'OLDER-SUMMARY', first.id), messages: [] },
+    { sourceEntry: answer, messages: [answer.message] },
+    { sourceEntry: next, messages: [next.message] },
+    { sourceEntry: nextAnswer, messages: [nextAnswer.message] },
+    { sourceEntry: current, messages: [current.message] },
+  ];
+  const result = await h.emit('agent_before_settle', { entries: [], continue: false, outcome: 'completed', context: { contextEntries, contextMessages: [], llmMessages: [], pendingMessages: [], canContinue: false } });
+  assert.deepEqual(result.entries.map(e => e.type), ['compaction', 'custom_message']);
+  const sent = JSON.stringify(h.requests.map(({ request }) => request));
+  assert.match(sent, /NEWEST-SUMMARY/, 'the newest summary is the one built on');
+  assert.doesNotMatch(sent, /OLDER-SUMMARY/, 'the replaced summary is not brought back');
+  assert.match(sent, /seed prompt/, 'and the kept history after it is summarized');
+});
+
 test('P1: a projection carrying a context edit is left to Pi\'s own preparation', async t => {
   const h = await host(t);
   h.usage(120000);
