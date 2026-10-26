@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
@@ -16,6 +16,9 @@ const globalModules = process.env.PI_DIR
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'self-compact-agent-'));
 const { loadExtensions } = await import(pathToFileURL(join(globalModules, '@earendil-works/pi-coding-agent/dist/core/extensions/loader.js')));
 const entry = resolve('extensions/self-compact/self-compact.ts');
+const piVersion = JSON.parse(readFileSync(join(globalModules, '@earendil-works/pi-coding-agent/package.json'), 'utf8')).version;
+// Pi 1.4 stopped capping summaries at a share of reserveTokens (#9512) and asks for the model's output limit.
+const reserveCapsSummary = Number(piVersion.split('.')[0]) === 1 && Number(piVersion.split('.')[1]) < 4;
 
 function seedEntries(chars = 2000) {
   // A minimal real-shaped branch: one finished turn plus the current user prompt, so Pi's cut-point
@@ -419,7 +422,8 @@ test('P2: native engine preserves split turns, previous summaries, budgets and f
   const result = await h.emit('session_before_compact', event);
   assert.ok(result.compaction);
   assert.equal(h.requests.length, 2);
-  assert.deepEqual(h.requests.map(({ options }) => options.maxTokens), [800, 500]);
+  // Pi's budgets (80% and 50% of reserveTokens) before 1.4; from 1.4 the model's limit, capped at 8192 by us.
+  assert.deepEqual(h.requests.map(({ options }) => options.maxTokens), reserveCapsSummary ? [800, 500] : [8192, 8192]);
   for (const { request, options } of h.requests) {
     assert.equal(request.systemPrompt, 'EXACT SYSTEM OVERRIDE');
     assert.equal(options.reasoningEffort, 'low');
