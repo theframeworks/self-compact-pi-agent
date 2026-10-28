@@ -81,6 +81,10 @@ pi-statusline's 16-cell bar, two dots two cells apart — and Pi's own
 auto-compaction becomes a backstop at 303,616 tokens rather than a number that
 can never be reached.
 
+For what has been published since, and for the models this fleet actually runs
+(Opus 5.5, Sonnet 5.5, Haiku 5.5), see
+[context-quality-evidence-2026.md](./context-quality-evidence-2026.md).
+
 ### Why this cannot be an extension setting
 
 The cap has to live in Pi's model metadata, because that is the only copy every
