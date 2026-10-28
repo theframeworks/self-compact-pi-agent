@@ -3,7 +3,7 @@
  * autonomous agent manage its own context window.
  *
  *   pi -e extensions/self-compact/self-compact.ts \
- *      [--compact-soft-at 10%] [--compact-at 20%] [--compact-buffer 10%] [--compact-prompt "..."]
+ *      [--compact-soft-at 100k] [--compact-at 140k] [--compact-buffer 30k] [--compact-prompt "..."]
  *
  * - Three thresholds (notice / warning / forced) resolved against the active model window, capped at 90%.
  * - Guidance reaches the model as a transient message on each LLM call while a phase is active

@@ -1,10 +1,11 @@
 # Where the thresholds come from
 
-The shipped defaults (10% / 20% / +10%) are percentages of whatever window the
-active model has. On a 1M-token model that is a hard cutoff at 300k, and the
-research says the useful part of a 1M window ends far earlier. This note collects
-what the sources actually recommend, so the numbers in a settings file can be
-argued rather than guessed.
+The shipped defaults (100k / 140k / +30k tokens) are absolute token counts, so
+they hold their meaning across the fleet rather than sliding with each model's
+window. Percentages of the window are still accepted where a share of it is what
+you mean, which is what the 1M-window figures below are quoted as. This note
+collects what the sources actually recommend, so the numbers in a settings file
+can be argued rather than guessed.
 
 ## The main finding: onset is absolute, not proportional
 
@@ -75,9 +76,10 @@ supports. It is a per-model override in `~/.pi/agent/models.json`, and
 ~/.pi/agent/scripts/pi-context-window.sh 320000   # cap at 320000
 ```
 
-At 320k the three lines land at 50%, 62.5% and 75%, two dots on the bar stay
-four cells apart, and Pi's own auto-compaction becomes a backstop at 303,616
-tokens rather than a number that can never be reached.
+At 320k the three lines land at 50%, 62.5% and 75% — cells 8, 10 and 12 of
+pi-statusline's 16-cell bar, two dots two cells apart — and Pi's own
+auto-compaction becomes a backstop at 303,616 tokens rather than a number that
+can never be reached.
 
 ### Why this cannot be an extension setting
 
