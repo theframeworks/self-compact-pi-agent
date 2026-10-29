@@ -145,6 +145,12 @@ interface Runtime {
 	 * automatic compaction is the backstop. Runtime only: a reload tries again.
 	 */
 	standingDown: boolean;
+	/**
+	 * The operator turned the nudges off for this session with `/self-compact off`. Guidance, threshold
+	 * entries, lock and notifications all stand down; the footer keeps publishing usage, and the phase
+	 * tag reads OFF so a muted session is visible rather than silent. Runtime only: a reload re-arms it.
+	 */
+	muted: boolean;
 }
 
 function nowPrompt(saved?: string): string {
@@ -200,6 +206,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		idleRequestEpoch: -1,
 		promptErrors: new Set(),
 		standingDown: false,
+		muted: false,
 	};
 
 	const flag = (name: string): string | undefined => {
@@ -356,6 +363,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 	/** Footer tag: REJECTED > handoff in flight (COMPACTING / COMPACTED / COMPACTION FAILED) > phase (NOTICE / WARNING / FORCED). */
 	function statusTag(): string {
 		if (inert()) return "REJECTED";
+		if (R.muted) return "OFF";
 		const h = handoff();
 		if (h && h.status !== "done") return handoffTag(h.status);
 		return levelTag(R.level);
@@ -407,6 +415,9 @@ export default function selfCompact(pi: ExtensionAPI) {
 	function trackLevel(ctx: ExtensionContext) {
 		refreshUi(ctx);
 		if (inert() || !R.thresholds) return;
+		// Muted: no threshold entry, no notification and no lock. The phase tag and the footer bar still
+		// show the real level, so the operator keeps the reading and only loses the interruptions.
+		if (R.muted) return;
 		const level = R.level;
 		if (level === "unknown" || level === "idle") return;
 		if (level === "forced" && !locked() && !activeHandoff() && !R.standingDown && compactable(ctx)) {
@@ -433,7 +444,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 
 	/** One transient guidance message is rebuilt from current usage for every LLM call. */
 	function guidanceText(ctx: ExtensionContext): string | undefined {
-		if (inert() || !R.thresholds || activeHandoff() || R.standingDown) return undefined;
+		if (inert() || !R.thresholds || activeHandoff() || R.standingDown || R.muted) return undefined;
 		const level = locked() ? "forced" : R.level;
 		if (level === "unknown" || level === "idle") return undefined;
 		if (!compactable(ctx)) return undefined;
@@ -601,6 +612,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 			tokens_until_warning: t && u.tokens !== null ? Math.max(0, t.warnTokens - u.tokens) : null,
 			tokens_until_hard_cutoff: t && u.tokens !== null ? Math.max(0, t.forcedTokens - u.tokens) : null,
 			tools_locked: locked(),
+			muted: R.muted,
 			pending_note: h ? { status: h.status, chars: h.note.length } : null,
 			compaction_cycles: R.state.cycle,
 			settings_error: inert() ?? null,
@@ -731,8 +743,41 @@ export default function selfCompact(pi: ExtensionAPI) {
 		},
 	});
 
-	// ------------------------------------------------------------- renderers
+	pi.registerCommand("self-compact", {
+		description: "Turn the nudges on or off for this session: `off` stands down guidance, threshold entries, notifications and the tool lock; `on` re-arms them. No argument reports the current state.",
+		handler: async (args, ctx: ExtensionCommandContext) => {
+			const arg = (args ?? "").trim().toLowerCase();
+			if (!arg) {
+				notify(ctx, `self-compact: nudges are ${R.muted ? "off" : "on"} for this session${R.muted ? " — guidance, threshold entries, notifications and the tool lock are stood down" : ""}.`, "info");
+				return;
+			}
+			if (arg !== "on" && arg !== "off") {
+				notify(ctx, `self-compact: expected \`on\` or \`off\`, got "${arg}".`, "warning");
+				return;
+			}
+			const muted = arg === "off";
+			if (R.muted === muted) {
+				notify(ctx, `self-compact: nudges are already ${arg}.`, "info");
+				return;
+			}
+			R.muted = muted;
+			// A mute must never strand a session that is already locked: releasing here is the command's
+			// whole point. Turning the nudges back on re-arms the announcements rather than staying quiet
+			// about a level the operator has not been told about.
+			if (muted) setLocked(false);
+			else R.announcedLevel = "idle";
+			refreshUi(ctx);
+			notify(
+				ctx,
+				muted
+					? "self-compact: nudges off. Guidance, threshold entries, notifications and the tool lock stand down for this session; the footer keeps showing the real numbers and the phase tag reads OFF."
+					: "self-compact: nudges on again. Guidance and the tool lock are re-armed at the thresholds in force.",
+				"info",
+			);
+		},
+	});
 
+	// ------------------------------------------------------------- renderers
 	pi.registerMessageRenderer(HANDOFF_TYPE, (message, options, theme) => {
 		const details = message.details as { cycle?: number; note?: string } | undefined;
 		const note = details?.note ?? (typeof message.content === "string" ? message.content : "");
@@ -910,6 +955,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		trackLevel(ctx);
 		const problem = inert();
 		if (problem) return { block: true, reason: `self-compact rejected its settings, so this session is not protected: ${problem}. Fix the --compact-* flags and restart.` };
+		if (R.muted) return undefined;
 		if (event.toolName === TOOL_NAME) return undefined;
 		// Looking at the gauge is always allowed, even while every other tool is locked.
 		if (event.toolName === VIEW_TOOL_NAME) return undefined;
@@ -949,7 +995,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 
 	pi.on("agent_end", async (_event, ctx) => {
 		trackLevel(ctx);
-		if (inert() || activeHandoff() || R.standingDown || R.idleRequestEpoch === R.epoch) return;
+		if (inert() || activeHandoff() || R.standingDown || R.muted || R.idleRequestEpoch === R.epoch) return;
 		if (!locked() && R.level !== "warning" && R.level !== "forced") return;
 		R.idleRequestEpoch = R.epoch;
 		pi.sendMessage({ customType: GUIDANCE_TYPE, content: nowPrompt(), display: false }, { triggerTurn: true, deliverAs: "followUp" });
