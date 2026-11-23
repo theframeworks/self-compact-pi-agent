@@ -13,7 +13,7 @@ import {
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { createAssistantMessageEventStream, type Context } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, type AssistantMessage, type Context } from "@earendil-works/pi-ai";
 import type { LoadedPrompt } from "./prompts.ts";
 
 type Preparation = Parameters<typeof compact>[0];
@@ -35,6 +35,25 @@ export class SummaryCutOffError extends Error {
 		super("Summary generation hit the output token cap even with thinking off, so the summary is incomplete.");
 		this.name = "SummaryCutOffError";
 	}
+}
+
+type StreamSimple = ExtensionContext["modelRegistry"]["streamSimple"];
+
+/**
+ * One summary request, as both summaries send it. streamSimple is the path Pi's own summary takes: it maps `reasoning`
+ * per provider and clamps maxTokens to the room the input leaves, and it resolves credentials and routing from inside a
+ * hook. Caching is pointless for a one-off summary, and the routing id is fresh.
+ */
+export function requestSummary(ctx: ExtensionContext, model: Parameters<StreamSimple>[0], context: Context, options: Parameters<StreamSimple>[2], signal: AbortSignal): Promise<AssistantMessage> {
+	return ctx.modelRegistry.streamSimple(model, context, { ...options, signal, cacheRetention: "none", sessionId: randomUUID() }).result();
+}
+
+/** The finished response as the stream compact() expects back, unless the summary was cancelled. */
+export function summaryStream(response: AssistantMessage, signal: AbortSignal) {
+	if (signal.aborted || response.stopReason === "aborted") throw new Error("Compaction summary cancelled.");
+	const stream = createAssistantMessageEventStream();
+	stream.end(response);
+	return stream;
 }
 
 /** The files a message's tool calls read, wrote or edited, as Pi records them in a compaction (calls made from a
@@ -259,10 +278,9 @@ export async function generateSummary(event: SummaryInput, ctx: ExtensionContext
 				// ignores `reasoning` and sends maxTokens as is, past the context window if need be.
 				// Leaving `reasoning` out is Pi's own "thinking off" for every provider.
 				const { reasoning: _reasoning, ...rest } = options ?? {};
-				return ctx.modelRegistry.streamSimple(model, { ...context, systemPrompt: system.text, messages: requestMessages }, {
-					...rest, maxTokens: requestedMaxTokens, signal: event.signal, cacheRetention: "none", sessionId: randomUUID(),
-					...(allowReasoning && reasoning ? { reasoning } : {}),
-				}).result();
+				return requestSummary(ctx, model, { ...context, systemPrompt: system.text, messages: requestMessages }, {
+					...rest, maxTokens: requestedMaxTokens, ...(allowReasoning && reasoning ? { reasoning } : {}),
+				}, event.signal);
 			};
 			let response = await attempt(true);
 			// Thinking shares the same output ceiling as the summary text on most providers (pi-ai's
@@ -275,11 +293,9 @@ export async function generateSummary(event: SummaryInput, ctx: ExtensionContext
 			if (!event.signal.aborted && response.stopReason === "length" && reasoning) {
 				response = await attempt(false);
 			}
-			if (event.signal.aborted || response.stopReason === "aborted") throw new Error("Compaction summary cancelled.");
+			const stream = summaryStream(response, event.signal);
 			if (response.stopReason === "length") throw new SummaryCutOffError();
 			if (response.stopReason !== "error" && !response.content.some(block => block.type === "text" && block.text.trim())) throw new Error("Summary response was empty.");
-			const stream = createAssistantMessageEventStream();
-			stream.end(response);
 			return stream;
 		},
 		undefined, SettingsManager.create(ctx.cwd).getRetrySettings(),
