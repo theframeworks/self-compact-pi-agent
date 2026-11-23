@@ -55,7 +55,9 @@ async function host(t, flags = {}, settings = { compaction: { keepRecentTokens: 
     modelRegistry: { complete: async (_model, request, options) => {
       requests.push({ request, options });
       return { role: 'assistant', api: 'openai-completions', provider: 'fake', model: 'parity-model', timestamp: 1, stopReason: 'stop', content: [{ type: 'text', text: 'Verified summary.' }], usage: { input: 10, output: 10, totalTokens: 20, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
-    } },
+    },
+    // The summaries go through streamSimple; it resolves to whatever `complete` (which a test may swap) answers.
+    streamSimple: (model, request, options) => ({ result: () => ctx.modelRegistry.complete(model, request, options) }) },
   };
   // The projection Pi hands a boundary hook: the entries, each with the messages the model would see.
   const projection = () => entries.map(entry => ({
@@ -129,7 +131,7 @@ test('P1: automatic compaction cannot bypass the note, including before settleme
   assert.equal(h.compactions.length, 1);
   const result = await h.emit('session_before_compact', summaryEvent());
   assert.ok(result.compaction);
-  assert.equal(h.requests[0].options.reasoningEffort, 'low');
+  assert.equal(h.requests[0].options.reasoning, 'low');
 });
 
 test('P1: compaction that keeps failing falls back to Pi\'s summary, then returns the note uncompacted', async t => {
@@ -468,7 +470,7 @@ test('P2: native engine preserves split turns, previous summaries, budgets and f
   assert.deepEqual(h.requests.map(({ options }) => options.maxTokens), reserveCapsSummary ? [800, 500] : [8192, 8192]);
   for (const { request, options } of h.requests) {
     assert.equal(request.systemPrompt, 'EXACT SYSTEM OVERRIDE');
-    assert.equal(options.reasoningEffort, 'low');
+    assert.equal(options.reasoning, 'low');
     assert.match(request.messages[0].content[0].text, /USER INSTRUCTIONS.*preserve evidence/);
     assert.match(request.messages[0].content[0].text, /Keep the failing test name/);
     assert.doesNotMatch(request.messages[0].content[0].text, /Use this EXACT format/);
@@ -505,6 +507,17 @@ test('P2: the summary gets the model\'s real output limit, not a fixed 8192', as
   assert.deepEqual(h.requests.map(({ options }) => options.maxTokens), [64000]);
 });
 
+test('P2: a large output limit does not shrink the input the summary sees', async t => {
+  const h = await host(t);
+  // An output ceiling close to the window: reserving all of it for the answer would leave the input 8000 chars.
+  h.ctx.model = { ...h.ctx.model, contextWindow: 200000, maxTokens: 190000 };
+  const result = await h.emit('session_before_compact', summaryEvent({ messagesToSummarize: [{ role: 'user', content: 'x'.repeat(50000), timestamp: 1 }] }));
+  assert.ok(result.compaction);
+  const sent = JSON.stringify(h.requests[0].request.messages);
+  assert.ok(!sent.includes('truncated to fit summary budget'), 'the 50k-char history is sent whole');
+  assert.equal(h.requests[0].options.maxTokens, 190000, 'the request still asks for the full ceiling; Pi clamps it');
+});
+
 test('P2: a summary cut off while thinking is retried once with thinking off, not repeated as is', async t => {
   const h = await host(t);
   h.ctx.thinkingLevel = 'high';
@@ -516,7 +529,7 @@ test('P2: a summary cut off while thinking is retried once with thinking off, no
   const result = await h.emit('session_before_compact', summaryEvent());
   assert.ok(result.compaction, 'the retry without thinking produces the checkpoint');
   assert.equal(h.requests.length, 2);
-  assert.ok(h.requests[0].options.reasoning, 'the first attempt keeps the session\'s thinking level');
+  assert.ok(h.requests[0].options.reasoning, 'the first attempt thinks');
   assert.equal(h.requests[1].options.reasoning, undefined);
   assert.equal(h.requests[1].options.reasoningEffort, undefined);
 });
