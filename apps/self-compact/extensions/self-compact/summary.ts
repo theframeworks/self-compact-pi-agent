@@ -213,20 +213,41 @@ export async function generateSummary(event: SummaryInput, ctx: ExtensionContext
 	const result = await compact(
 		event.preparation, ctx.model, undefined, undefined, event.customInstructions, event.signal, ctx.thinkingLevel,
 		async (model, context, options) => {
-			const maxTokens = Math.min(options?.maxTokens ?? 8192, model.maxTokens || 8192, 8192);
-			const budgetChars = Math.max(8000, (model.contextWindow - maxTokens - 2000) * 4 - system.text.length - userInstructions.length);
-			const { messages, truncated } = replaceInstructions(context, inputs, userInstructions, budgetChars);
-			truncatedInput ||= truncated;
-			// Pi 1.2 folds its own system prompt into the message list as messages[0] before it
-			// calls us, and replaceInstructions leaves non-user messages alone, so Pi's
-			// summarization prompt would ride along next to the override we were asked to use.
-			// That prompt is the one carrying the "Use this EXACT format" instructions ours
-			// exist to replace, so drop it and let systemPrompt below be the only one.
-			const requestMessages = messages[0]?.role === "system" ? messages.slice(1) : messages;
-			const response = await ctx.modelRegistry.complete(model, { ...context, systemPrompt: system.text, messages: requestMessages }, {
-				...options, maxTokens, signal: event.signal, cacheRetention: "none", sessionId: randomUUID(),
-				...(model.api === "openai-completions" && model.reasoning ? { reasoningEffort: "low" as const } : {}),
-			});
+			// Pi's own default is the model's real output ceiling (clamped to whatever room the
+			// context window leaves), not a fixed number (pi-ai's buildBaseOptions/
+			// clampMaxTokensToContext, #9512). compact() never sets options.maxTokens itself, so an
+			// arbitrary floor here was the cap: a model whose real ceiling is far above 8192 (the
+			// common case) was held to it regardless, and a split-turn summary of a large session
+			// hit stopReason "length" well before it was capable of finishing.
+			const requestedMaxTokens = options?.maxTokens ?? (model.maxTokens || 8192);
+			const attempt = async (maxTokens: number, allowReasoning: boolean) => {
+				const budgetChars = Math.max(8000, (model.contextWindow - maxTokens - 2000) * 4 - system.text.length - userInstructions.length);
+				const { messages, truncated } = replaceInstructions(context, inputs, userInstructions, budgetChars);
+				truncatedInput ||= truncated;
+				// Pi 1.2 folds its own system prompt into the message list as messages[0] before it
+				// calls us, and replaceInstructions leaves non-user messages alone, so Pi's
+				// summarization prompt would ride along next to the override we were asked to use.
+				// That prompt is the one carrying the "Use this EXACT format" instructions ours
+				// exist to replace, so drop it and let systemPrompt below be the only one.
+				const requestMessages = messages[0]?.role === "system" ? messages.slice(1) : messages;
+				const { reasoning: _reasoning, ...rest } = options ?? {};
+				return ctx.modelRegistry.complete(model, { ...context, systemPrompt: system.text, messages: requestMessages }, {
+					...rest, maxTokens, signal: event.signal, cacheRetention: "none", sessionId: randomUUID(),
+					...(allowReasoning && options?.reasoning ? { reasoning: options.reasoning } : {}),
+					...(allowReasoning && model.api === "openai-completions" && model.reasoning ? { reasoningEffort: "low" as const } : {}),
+				});
+			};
+			let response = await attempt(requestedMaxTokens, true);
+			// Thinking shares the same output ceiling as the summary text on most providers (pi-ai's
+			// adjustMaxTokensForThinking/clampMaxTokensToContext in api/simple-options.js), so with
+			// reasoning on, a long thinking pass can exhaust maxTokens before any summary text comes
+			// out, surfacing as stopReason "length" (getSummarizationFailure in Pi's compaction.js:
+			// "hit the token cap and the summary is incomplete"). Retrying the identical request is
+			// pointless: it is deterministic. Retry once with reasoning off instead, which is a
+			// different request and leaves the whole budget to the summary text.
+			if (!event.signal.aborted && response.stopReason === "length" && options?.reasoning) {
+				response = await attempt(requestedMaxTokens, false);
+			}
 			if (event.signal.aborted || response.stopReason === "aborted") throw new Error("Compaction summary cancelled.");
 			if (response.stopReason !== "error" && !response.content.some(block => block.type === "text" && block.text.trim())) throw new Error("Summary response was empty.");
 			const stream = createAssistantMessageEventStream();

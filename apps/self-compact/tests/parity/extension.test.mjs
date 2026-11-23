@@ -464,7 +464,7 @@ test('P2: native engine preserves split turns, previous summaries, budgets and f
   const result = await h.emit('session_before_compact', event);
   assert.ok(result.compaction);
   assert.equal(h.requests.length, 2);
-  // Pi's budgets (80% and 50% of reserveTokens) before 1.4; from 1.4 the model's limit, capped at 8192 by us.
+  // Pi's budgets (80% and 50% of reserveTokens) before 1.4; from 1.4 Pi passes none, so the model's own limit (8192 here).
   assert.deepEqual(h.requests.map(({ options }) => options.maxTokens), reserveCapsSummary ? [800, 500] : [8192, 8192]);
   for (const { request, options } of h.requests) {
     assert.equal(request.systemPrompt, 'EXACT SYSTEM OVERRIDE');
@@ -495,6 +495,30 @@ test('P2: configured transport retry applies inside each summary attempt', async
   const result = await h.emit('session_before_compact', summaryEvent());
   assert.equal(calls, 2);
   assert.equal(result.compaction.details.selfCompact.attempt, 1, 'transport retry succeeds within the first logical summary attempt');
+});
+
+test('P2: the summary gets the model\'s real output limit, not a fixed 8192', async t => {
+  const h = await host(t);
+  h.ctx.model = { ...h.ctx.model, maxTokens: 64000 };
+  const result = await h.emit('session_before_compact', summaryEvent());
+  assert.ok(result.compaction);
+  assert.deepEqual(h.requests.map(({ options }) => options.maxTokens), [64000]);
+});
+
+test('P2: a summary cut off while thinking is retried once with thinking off, not repeated as is', async t => {
+  const h = await host(t);
+  h.ctx.thinkingLevel = 'high';
+  const complete = h.ctx.modelRegistry.complete;
+  h.ctx.modelRegistry.complete = async (model, request, options) => {
+    const response = await complete(model, request, options);
+    return options.reasoning ? { ...response, content: [], stopReason: 'length' } : response;
+  };
+  const result = await h.emit('session_before_compact', summaryEvent());
+  assert.ok(result.compaction, 'the retry without thinking produces the checkpoint');
+  assert.equal(h.requests.length, 2);
+  assert.ok(h.requests[0].options.reasoning, 'the first attempt keeps the session\'s thinking level');
+  assert.equal(h.requests[1].options.reasoning, undefined);
+  assert.equal(h.requests[1].options.reasoningEffort, undefined);
 });
 
 test('P2: empty, truncated and tool-calling summaries never become checkpoints', async t => {
