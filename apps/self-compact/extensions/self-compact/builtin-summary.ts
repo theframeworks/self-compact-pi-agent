@@ -11,25 +11,15 @@
  * way the rest of the extension does, since a hook has no access to Pi's internal summarization auth. Everything
  * else — the summarization prompts, the split-turn handling, the file lists, the configured retry policy — is Pi's.
  */
-import { randomUUID } from "node:crypto";
 import { compact, SettingsManager, type CompactionResult, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import type { SummaryInput } from "./summary.ts";
+import { requestSummary, summaryStream, type SummaryInput } from "./summary.ts";
 
 export async function generateBuiltinSummary(input: SummaryInput, ctx: ExtensionContext): Promise<CompactionResult> {
 	if (!ctx.model) throw new Error("No model available for compaction.");
 	const result = await compact(
 		input.preparation, ctx.model, undefined, undefined, input.customInstructions, input.signal, ctx.thinkingLevel,
-		async (model, context, options) => {
-			// Pi built this context from its own prompts: pass it through untouched, which is what makes the
-			// summary "built-in". Caching is pointless for a one-off summary, and the routing id is fresh. streamSimple is
-			// the path Pi's own summary takes: it maps `reasoning` per provider and clamps maxTokens to the room left.
-			const response = await ctx.modelRegistry.streamSimple(model, context, { ...options, signal: input.signal, cacheRetention: "none", sessionId: randomUUID() }).result();
-			if (input.signal.aborted || response.stopReason === "aborted") throw new Error("Compaction summary cancelled.");
-			const stream = createAssistantMessageEventStream();
-			stream.end(response);
-			return stream;
-		},
+		// Pi built this context from its own prompts: pass it through untouched, which is what makes the summary "built-in".
+		async (model, context, options) => summaryStream(await requestSummary(ctx, model, context, options, input.signal), input.signal),
 		undefined, SettingsManager.create(ctx.cwd).getRetrySettings(),
 	);
 	if (input.signal.aborted) throw new Error("Compaction summary cancelled.");
