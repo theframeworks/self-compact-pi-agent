@@ -83,10 +83,11 @@ export const TOOL_NAME = "self_compact";
 export const VIEW_TOOL_NAME = "view_context";
 export { HANDOFF_TYPE, STATE_TYPE };
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
-const MAX_AUTO_RETRIES = 3;
+/** Automatic compaction attempts per handoff, the first one included. */
+const MAX_HANDOFF_ATTEMPTS = 3;
 const SUMMARY_ATTEMPTS = 2;
-/** The attempt count at which the next automatic compaction is the last one, made with Pi's built-in summary. */
-const LAST_ATTEMPT = MAX_AUTO_RETRIES - 1;
+/** Whether the 1-based handoff attempt `attempt` is the last automatic one, made with Pi's built-in summary. */
+const isLastAttempt = (attempt: number): boolean => attempt >= MAX_HANDOFF_ATTEMPTS;
 const GUIDANCE_TYPE = "self-compact-guidance";
 
 /**
@@ -107,6 +108,9 @@ export const FEED_EVENT = "self-compact:updated";
 
 /** Static system-prompt line: never changes between calls so the prompt-cache prefix stays stable. */
 const SYSTEM_PROMPT_LINE = `\n\nself-compact: when context usage crosses a threshold you receive a transient [self-compact · …] message with live numbers. You cannot see your own context usage otherwise: call view_context (no arguments) whenever you need the current numbers as JSON, for example after a compaction or before deciding to compact; do not poll it every turn. After a compaction, your own saved note_to_self is returned to you verbatim as the next message (exactly the note text, nothing else); resume its NEXT ACTION without another user message and never restart work the note marks as done. If no work remains, report completion and stop.`;
+
+/** A compaction summary, or the reason none could be written. Undefined when the summary was cancelled. */
+type SummaryOutcome = { compaction: CompactionResult } | { error: string } | undefined;
 
 interface UsageSnapshot {
 	tokens: number | null;
@@ -267,6 +271,11 @@ export default function selfCompact(pi: ExtensionAPI) {
 	};
 	/** The tool block is the one behaviour a failing summarizer can turn into a dead end, so it is switchable. */
 	const locked = (): boolean => R.state.locked && R.settings.lockTools;
+	/**
+	 * No guidance and no compact-now prompt: the settings were rejected, a note is already in flight, compaction was
+	 * given up on, or the operator muted the nudges.
+	 */
+	const nudgesStoodDown = (): boolean => Boolean(inert() || activeHandoff() || R.standingDown || R.muted);
 
 	// ---------------------------------------------------------------- helpers
 
@@ -446,7 +455,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 
 	/** One transient guidance message is rebuilt from current usage for every LLM call. */
 	function guidanceText(ctx: ExtensionContext): string | undefined {
-		if (inert() || !R.thresholds || activeHandoff() || R.standingDown || R.muted) return undefined;
+		if (nudgesStoodDown() || !R.thresholds) return undefined;
 		const level = locked() ? "forced" : R.level;
 		if (level === "unknown" || level === "idle") return undefined;
 		if (!compactable(ctx)) return undefined;
@@ -534,13 +543,15 @@ export default function selfCompact(pi: ExtensionAPI) {
 	 * /compact or a reload retries it — so this is the operator's call, not the failure's. Off, the operator has not
 	 * asked to be held at the cutoff: the note is returned uncompacted (the returned handoff), the tools unlock, and
 	 * Pi's automatic compaction takes over the context.
+	 *
+	 * Returns "held" when the lock holds, otherwise the handoff released as ready for the caller to return.
 	 */
-	function giveUp(ctx: ExtensionContext, h: Handoff): Handoff | undefined {
+	function giveUp(ctx: ExtensionContext, h: Handoff): Handoff | "held" {
 		if (R.settings.lockTools) {
 			// While muted (/self-compact off) tool_call enforces no lock, so don't claim one.
 			const lock = R.muted ? "Tools are not blocked while nudges are off (/self-compact off)" : "Tools stay locked (selfCompact.lockTools)";
 			notify(ctx, `self-compact: compaction failed ${h.attempts} times: ${h.error}. ${lock}: the note is saved, so retry it with ${TOOL_NAME}, /compact, or a reload once the summary provider works.`, "error");
-			return undefined;
+			return "held";
 		}
 		R.standingDown = true;
 		const ready: Handoff = { ...h, status: "ready" };
@@ -550,6 +561,26 @@ export default function selfCompact(pi: ExtensionAPI) {
 		refreshUi(ctx);
 		notify(ctx, `self-compact: compaction failed ${h.attempts} times: ${h.error}. Returning the note without compacting and restoring tools; Pi's automatic compaction takes over when the window fills.`, "error");
 		return ready;
+	}
+
+	/** A failed attempt with attempts left; `h` already counts it. */
+	function notifyRetrying(ctx: ExtensionContext, h: Handoff) {
+		notify(ctx, `self-compact: compaction failed (attempt ${h.attempts}): ${h.error}. Note kept, tools stay locked, retrying automatically.`, "warning");
+	}
+
+	/** A cancelled attempt: nothing retries on its own. `h` already counts it. */
+	function notifyCancelled(ctx: ExtensionContext, h: Handoff) {
+		notify(ctx, `self-compact: compaction cancelled (attempt ${h.attempts}): ${h.error}. Note kept and tools stay locked. Run /self-compact-now or /compact to retry.`, "error");
+	}
+
+	/** The attempt about to run is the last one; `h` counts the attempts already made. */
+	function notifyLastAttempt(ctx: ExtensionContext, h: Handoff) {
+		notify(ctx, `self-compact: last attempt (${h.attempts + 1}) uses Pi's built-in summary.`, "warning");
+	}
+
+	/** Tag a summary with the handoff it carries, so the compaction entry records what produced it. */
+	function tagCompaction(result: CompactionResult, h: Handoff | undefined, selfCompact: Record<string, unknown>): { compaction: CompactionResult } {
+		return { compaction: { ...result, details: { ...(result.details as Record<string, unknown>), handoffId: h?.id, selfCompact } } };
 	}
 
 	function scheduleRetry(ctx: ExtensionContext) {
@@ -806,6 +837,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 	});
 
 	// ------------------------------------------------------------- renderers
+
 	pi.registerMessageRenderer(HANDOFF_TYPE, (message, options, theme) => {
 		const details = message.details as { cycle?: number; note?: string } | undefined;
 		const note = details?.note ?? (typeof message.content === "string" ? message.content : "");
@@ -1023,7 +1055,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 
 	pi.on("agent_end", async (_event, ctx) => {
 		trackLevel(ctx);
-		if (inert() || activeHandoff() || R.standingDown || R.muted || R.idleRequestEpoch === R.epoch) return;
+		if (nudgesStoodDown() || R.idleRequestEpoch === R.epoch) return;
 		if (!locked() && R.level !== "warning" && R.level !== "forced") return;
 		R.idleRequestEpoch = R.epoch;
 		pi.sendMessage({ customType: GUIDANCE_TYPE, content: nowPrompt(), display: false }, { triggerTurn: true, deliverAs: "followUp" });
@@ -1036,14 +1068,14 @@ export default function selfCompact(pi: ExtensionAPI) {
 		const h = handoff();
 		if (!h || !ctx.isIdle()) return;
 		if (h.status === "ready") deliverHandoff(ctx);
-		else if (h.status === "pending" || (h.status === "failed" && h.attempts < MAX_AUTO_RETRIES && R.lastCompactionError)) startCompaction(ctx, h.status === "pending" ? "agent idle" : "retry after failure");
+		else if (h.status === "pending" || (h.status === "failed" && h.attempts < MAX_HANDOFF_ATTEMPTS && R.lastCompactionError)) startCompaction(ctx, h.status === "pending" ? "agent idle" : "retry after failure");
 	});
 
 	/**
 	 * A compaction summary from the replacement prompt, tagged with the handoff it carries, or the reason none could
 	 * be written (also kept in R.lastCompactionError). Undefined when cancelled.
 	 */
-	async function summarize(input: SummaryInput, ctx: ExtensionContext, reason: string): Promise<{ compaction: CompactionResult } | { error: string } | undefined> {
+	async function summarize(input: SummaryInput, ctx: ExtensionContext, reason: string): Promise<SummaryOutcome> {
 		R.lastCompactionError = undefined;
 		let prompt;
 		try { prompt = resolveCompactionPrompt({ flag: R.compactPromptFlag, searchDirs: R.searchDirs }); }
@@ -1059,16 +1091,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 			try {
 				const instructions = loadPromptFile("summaryInstructions", R.searchDirs);
 				const { result, truncatedInput } = await generateSummary(input, ctx, prompt, instructions);
-				return {
-					compaction: {
-						...result,
-						details: {
-							...(result.details as Record<string, unknown>),
-							handoffId: h?.id,
-							selfCompact: { cycle: R.state.cycle + (h ? 1 : 0), promptSource: prompt.source, userPromptSource: instructions.source, reason, noteChars: h?.note.length ?? 0, truncatedInput, attempt },
-						},
-					},
-				};
+				return tagCompaction(result, h, { cycle: R.state.cycle + (h ? 1 : 0), promptSource: prompt.source, userPromptSource: instructions.source, reason, noteChars: h?.note.length ?? 0, truncatedInput, attempt });
 			} catch (error) {
 				lastError = error instanceof Error ? error.message : String(error);
 				if (input.signal.aborted) return undefined;
@@ -1098,9 +1121,9 @@ export default function selfCompact(pi: ExtensionAPI) {
 		}
 		if (!ctx.model) return undefined;
 		// The note's last attempt: our prompt has failed on every attempt so far, so Pi writes its built-in summary.
-		if (h && h.attempts >= LAST_ATTEMPT) {
+		if (h && isLastAttempt(h.attempts + 1)) {
 			R.lastCompactionError = undefined;
-			notify(ctx, `self-compact: last attempt (${h.attempts + 1}) uses Pi's built-in summary.`, "warning");
+			notifyLastAttempt(ctx, h);
 			return undefined;
 		}
 		const summary = await summarize(event, ctx, event.reason);
@@ -1113,24 +1136,14 @@ export default function selfCompact(pi: ExtensionAPI) {
 
 	/**
 	 * One automatic attempt at a handoff's compaction: the replacement prompt, or Pi's built-in summary on the last
-	 * attempt, when our prompt is what the summarizer has been choking on. Same shape as summarize(): the compaction,
-	 * the reason none could be written, or undefined when it was cancelled.
+	 * attempt, when our prompt is what the summarizer has been choking on.
 	 */
-	async function attemptHandoffSummary(input: SummaryInput, ctx: ExtensionContext, h: Handoff, attempt: number): Promise<{ compaction: CompactionResult } | { error: string } | undefined> {
-		if (attempt < MAX_AUTO_RETRIES) return summarize(input, ctx, "handoff");
+	async function attemptHandoffSummary(input: SummaryInput, ctx: ExtensionContext, h: Handoff, attempt: number): Promise<SummaryOutcome> {
+		if (!isLastAttempt(attempt)) return summarize(input, ctx, "handoff");
 		R.lastCompactionError = undefined;
 		try {
 			const result = await generateBuiltinSummary(input, ctx);
-			return {
-				compaction: {
-					...result,
-					details: {
-						...(result.details as Record<string, unknown>),
-						handoffId: h.id,
-						selfCompact: { cycle: R.state.cycle + 1, promptSource: "pi-builtin", reason: "handoff", noteChars: h.note.length, attempt },
-					},
-				},
-			};
+			return tagCompaction(result, h, { cycle: R.state.cycle + 1, promptSource: "pi-builtin", reason: "handoff", noteChars: h.note.length, attempt });
 		} catch (error) {
 			if (input.signal.aborted) return undefined;
 			R.lastCompactionError = `Pi's built-in summary failed: ${error instanceof Error ? error.message : String(error)}`;
@@ -1157,7 +1170,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 	pi.on("agent_before_settle", async (event, ctx) => {
 		if (!R.alive || inert() || event.outcome === "aborted" || !ctx.model) return undefined;
 		const saved = activeHandoff();
-		if (!saved || (saved.status !== "pending" && saved.status !== "failed") || saved.attempts >= MAX_AUTO_RETRIES) return undefined;
+		if (!saved || (saved.status !== "pending" && saved.status !== "failed") || saved.attempts >= MAX_HANDOFF_ATTEMPTS) return undefined;
 		let h: Handoff = saved;
 		// The projection Pi would compact, not the raw branch: after a context edit they differ. Pi commits the entries
 		// this returns without emitting session_compact, so nothing else would catch a cut made in the wrong place.
@@ -1165,12 +1178,12 @@ export default function selfCompact(pi: ExtensionAPI) {
 		if (!preparation) return undefined;
 		const input: SummaryInput = { preparation, customInstructions: undefined, signal: ctx.signal ?? new AbortController().signal };
 		let compaction: CompactionResult | undefined;
-		while (h.attempts < MAX_AUTO_RETRIES) {
+		while (h.attempts < MAX_HANDOFF_ATTEMPTS) {
 			const attempt = h.attempts + 1;
 			R.compactionInFlight = true;
 			R.state.handoff = h = { ...h, status: "compacting" };
 			save();
-			if (attempt >= MAX_AUTO_RETRIES) notify(ctx, `self-compact: last attempt (${attempt}) uses Pi's built-in summary.`, "warning");
+			if (isLastAttempt(attempt)) notifyLastAttempt(ctx, h);
 			else notify(ctx, `self-compact: compacting (${attempt === 1 ? "end of turn" : `retry ${attempt}`}, note ${h.note.length} chars)…`, "info");
 			refreshUi(ctx);
 			const summary = await attemptHandoffSummary(input, ctx, h, attempt);
@@ -1189,16 +1202,16 @@ export default function selfCompact(pi: ExtensionAPI) {
 				// The operator stopped the agent: the note and the lock survive and /self-compact-now or /compact finish it.
 				// Clearing the error keeps agent_settled from retrying on its own, which is what the message promises.
 				R.lastCompactionError = undefined;
-				notify(ctx, `self-compact: compaction cancelled (attempt ${attempt}): ${h.error}. Note kept and tools stay locked. Run /self-compact-now or /compact to retry.`, "error");
+				notifyCancelled(ctx, h);
 				return undefined;
 			}
-			if (h.attempts < MAX_AUTO_RETRIES) notify(ctx, `self-compact: compaction failed (attempt ${attempt}): ${h.error}. Note kept, tools stay locked, retrying automatically.`, "warning");
+			if (h.attempts < MAX_HANDOFF_ATTEMPTS) notifyRetrying(ctx, h);
 		}
 		if (!compaction) {
 			// Every attempt failed. With lockTools on the run stops here with the note saved; with it off the note comes
 			// back uncompacted in this same run, which is the whole point of asking for availability over the cutoff.
 			const ready = giveUp(ctx, h);
-			if (!ready) return undefined;
+			if (ready === "held") return undefined;
 			return { entries: [...event.entries, { type: "custom_message", ...handoffMessage(ready, R.state.cycle) }], continue: true };
 		}
 		compactionSucceeded(ctx, h, "at the end of the turn");
@@ -1246,14 +1259,14 @@ export default function selfCompact(pi: ExtensionAPI) {
 		save();
 		refreshUi(ctx);
 		const current = handoff()!;
-		const canRetry = (ours || !event.aborted) && current.attempts < MAX_AUTO_RETRIES;
+		const canRetry = (ours || !event.aborted) && current.attempts < MAX_HANDOFF_ATTEMPTS;
 		if (canRetry) {
-			notify(ctx, `self-compact: compaction failed (attempt ${current.attempts}): ${current.error}. Note kept, tools stay locked, retrying automatically.`, "warning");
+			notifyRetrying(ctx, current);
 			scheduleRetry(ctx);
 		} else if (ours || !event.aborted) {
-			if (giveUp(ctx, current)) deliverHandoff(ctx);
+			if (giveUp(ctx, current) !== "held") deliverHandoff(ctx);
 		} else {
-			notify(ctx, `self-compact: compaction cancelled (attempt ${current.attempts}): ${current.error}. Note kept and tools stay locked. Run /self-compact-now or /compact to retry.`, "error");
+			notifyCancelled(ctx, current);
 		}
 	});
 }
