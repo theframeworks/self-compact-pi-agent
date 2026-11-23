@@ -537,7 +537,9 @@ export default function selfCompact(pi: ExtensionAPI) {
 	 */
 	function giveUp(ctx: ExtensionContext, h: Handoff): Handoff | undefined {
 		if (R.settings.lockTools) {
-			notify(ctx, `self-compact: compaction failed ${h.attempts} times: ${h.error}. Tools stay locked (selfCompact.lockTools): the note is saved, so retry it with ${TOOL_NAME}, /compact, or a reload once the summary provider works.`, "error");
+			// While muted (/self-compact off) tool_call enforces no lock, so don't claim one.
+			const lock = R.muted ? "Tools are not blocked while nudges are off (/self-compact off)" : "Tools stay locked (selfCompact.lockTools)";
+			notify(ctx, `self-compact: compaction failed ${h.attempts} times: ${h.error}. ${lock}: the note is saved, so retry it with ${TOOL_NAME}, /compact, or a reload once the summary provider works.`, "error");
 			return undefined;
 		}
 		R.standingDown = true;
@@ -1179,6 +1181,8 @@ export default function selfCompact(pi: ExtensionAPI) {
 			refreshUi(ctx);
 			if (cancelled) {
 				// The operator stopped the agent: the note and the lock survive and /self-compact-now or /compact finish it.
+				// Clearing the error keeps agent_settled from retrying on its own, which is what the message promises.
+				R.lastCompactionError = undefined;
 				notify(ctx, `self-compact: compaction cancelled (attempt ${attempt}): ${h.error}. Note kept and tools stay locked. Run /self-compact-now or /compact to retry.`, "error");
 				return undefined;
 			}
