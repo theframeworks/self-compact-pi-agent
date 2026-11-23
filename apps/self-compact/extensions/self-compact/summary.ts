@@ -20,6 +20,10 @@ type Preparation = Parameters<typeof compact>[0];
 type CompactionSettings = Preparation["settings"];
 type FileOperations = Preparation["fileOps"];
 
+/** Tokens the summary input leaves free for the answer (thinking included). The request still asks for the model's
+ * full output ceiling; Pi clamps that to the room actually left. */
+const SUMMARY_OUTPUT_RESERVE = 16_384;
+
 /** The files a message's tool calls read, wrote or edited, as Pi records them in a compaction (calls made from a
  * codemode script are recorded on the script's tool result). */
 function addFileOps(message: AgentMessage, fileOps: FileOperations) {
@@ -213,15 +217,22 @@ export async function generateSummary(event: SummaryInput, ctx: ExtensionContext
 	const result = await compact(
 		event.preparation, ctx.model, undefined, undefined, event.customInstructions, event.signal, ctx.thinkingLevel,
 		async (model, context, options) => {
-			// Pi's own default is the model's real output ceiling (clamped to whatever room the
-			// context window leaves), not a fixed number (pi-ai's buildBaseOptions/
-			// clampMaxTokensToContext, #9512). compact() never sets options.maxTokens itself, so an
-			// arbitrary floor here was the cap: a model whose real ceiling is far above 8192 (the
-			// common case) was held to it regardless, and a split-turn summary of a large session
-			// hit stopReason "length" well before it was capable of finishing.
-			const requestedMaxTokens = options?.maxTokens ?? (model.maxTokens || 8192);
-			const attempt = async (maxTokens: number, allowReasoning: boolean) => {
-				const budgetChars = Math.max(8000, (model.contextWindow - maxTokens - 2000) * 4 - system.text.length - userInstructions.length);
+			// Pi's own default is the model's real output ceiling, not a fixed number (#9512).
+			// compact() never sets options.maxTokens itself, so an arbitrary floor here was the cap:
+			// a model whose real ceiling is far above 8192 (the common case) was held to it
+			// regardless, and a split-turn summary of a large session hit stopReason "length" well
+			// before it was capable of finishing. streamSimple clamps it to whatever room the input
+			// leaves (pi-ai's buildBaseOptions/clampMaxTokensToContext).
+			const requestedMaxTokens = options?.maxTokens ?? (model.maxTokens || SUMMARY_OUTPUT_RESERVE);
+			// The input budget reserves a fixed share for the answer, not the whole output ceiling:
+			// that ceiling is 64k-128k on current models (on some close to the context window), and
+			// reserving all of it would cut the session down to a sliver before the summarizer saw it.
+			const outputReserve = Math.min(requestedMaxTokens, SUMMARY_OUTPUT_RESERVE);
+			const budgetChars = Math.max(8000, (model.contextWindow - outputReserve - 2000) * 4 - system.text.length - userInstructions.length);
+			// Reasoning models on openai-completions summarize at low effort whatever the session's level (a summary
+			// is not worth a long thinking pass); every other model follows the session, as Pi's own summary does.
+			const reasoning = model.api === "openai-completions" && model.reasoning ? "low" as const : options?.reasoning;
+			const attempt = async (allowReasoning: boolean) => {
 				const { messages, truncated } = replaceInstructions(context, inputs, userInstructions, budgetChars);
 				truncatedInput ||= truncated;
 				// Pi 1.2 folds its own system prompt into the message list as messages[0] before it
@@ -230,14 +241,17 @@ export async function generateSummary(event: SummaryInput, ctx: ExtensionContext
 				// That prompt is the one carrying the "Use this EXACT format" instructions ours
 				// exist to replace, so drop it and let systemPrompt below be the only one.
 				const requestMessages = messages[0]?.role === "system" ? messages.slice(1) : messages;
+				// streamSimple, not complete(): compact() hands us provider-neutral options (`reasoning`,
+				// an unclamped maxTokens), and only the simple path maps them per provider. The raw path
+				// ignores `reasoning` and sends maxTokens as is, past the context window if need be.
+				// Leaving `reasoning` out is Pi's own "thinking off" for every provider.
 				const { reasoning: _reasoning, ...rest } = options ?? {};
-				return ctx.modelRegistry.complete(model, { ...context, systemPrompt: system.text, messages: requestMessages }, {
-					...rest, maxTokens, signal: event.signal, cacheRetention: "none", sessionId: randomUUID(),
-					...(allowReasoning && options?.reasoning ? { reasoning: options.reasoning } : {}),
-					...(allowReasoning && model.api === "openai-completions" && model.reasoning ? { reasoningEffort: "low" as const } : {}),
-				});
+				return ctx.modelRegistry.streamSimple(model, { ...context, systemPrompt: system.text, messages: requestMessages }, {
+					...rest, maxTokens: requestedMaxTokens, signal: event.signal, cacheRetention: "none", sessionId: randomUUID(),
+					...(allowReasoning && reasoning ? { reasoning } : {}),
+				}).result();
 			};
-			let response = await attempt(requestedMaxTokens, true);
+			let response = await attempt(true);
 			// Thinking shares the same output ceiling as the summary text on most providers (pi-ai's
 			// adjustMaxTokensForThinking/clampMaxTokensToContext in api/simple-options.js), so with
 			// reasoning on, a long thinking pass can exhaust maxTokens before any summary text comes
@@ -245,8 +259,8 @@ export async function generateSummary(event: SummaryInput, ctx: ExtensionContext
 			// "hit the token cap and the summary is incomplete"). Retrying the identical request is
 			// pointless: it is deterministic. Retry once with reasoning off instead, which is a
 			// different request and leaves the whole budget to the summary text.
-			if (!event.signal.aborted && response.stopReason === "length" && options?.reasoning) {
-				response = await attempt(requestedMaxTokens, false);
+			if (!event.signal.aborted && response.stopReason === "length" && reasoning) {
+				response = await attempt(false);
 			}
 			if (event.signal.aborted || response.stopReason === "aborted") throw new Error("Compaction summary cancelled.");
 			if (response.stopReason !== "error" && !response.content.some(block => block.type === "text" && block.text.trim())) throw new Error("Summary response was empty.");

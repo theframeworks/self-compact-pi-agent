@@ -7,7 +7,7 @@
  * the handoff must not do — so this calls the exported `compact()` with no prompt replacement and returns the result
  * as a `compaction` draft entry the boundary hook commits itself.
  *
- * The only thing it supplies is the transport: `ctx.modelRegistry.complete()` resolves credentials and routing the
+ * The only thing it supplies is the transport: `ctx.modelRegistry.streamSimple()` resolves credentials and routing the
  * way the rest of the extension does, since a hook has no access to Pi's internal summarization auth. Everything
  * else — the summarization prompts, the split-turn handling, the file lists, the configured retry policy — is Pi's.
  */
@@ -22,8 +22,9 @@ export async function generateBuiltinSummary(input: SummaryInput, ctx: Extension
 		input.preparation, ctx.model, undefined, undefined, input.customInstructions, input.signal, ctx.thinkingLevel,
 		async (model, context, options) => {
 			// Pi built this context from its own prompts: pass it through untouched, which is what makes the
-			// summary "built-in". Caching is pointless for a one-off summary, and the routing id is fresh.
-			const response = await ctx.modelRegistry.complete(model, context, { ...options, signal: input.signal, cacheRetention: "none", sessionId: randomUUID() });
+			// summary "built-in". Caching is pointless for a one-off summary, and the routing id is fresh. streamSimple is
+			// the path Pi's own summary takes: it maps `reasoning` per provider and clamps maxTokens to the room left.
+			const response = await ctx.modelRegistry.streamSimple(model, context, { ...options, signal: input.signal, cacheRetention: "none", sessionId: randomUUID() }).result();
 			if (input.signal.aborted || response.stopReason === "aborted") throw new Error("Compaction summary cancelled.");
 			const stream = createAssistantMessageEventStream();
 			stream.end(response);
