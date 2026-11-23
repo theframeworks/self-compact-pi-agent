@@ -21,7 +21,7 @@ Values are token counts (`270000`, `100k`, `1.5m`) or, where a share of the wind
 
 ## Tools and commands
 
-- `self_compact(note_to_self)`: saves the note (1 to 24,000 chars), ends the turn, compacts before the run settles, returns the note verbatim as the next message in the same run (a failed compaction is retried once idle, the last time with Pi's built-in summary; if every attempt fails, `lockTools` decides: on, the tools stay locked at the cutoff with the note saved; off, the note comes back uncompacted and the tools unlock). Refuses when Pi would find nothing to compact (the session still fits inside `keepRecentTokens`).
+- `self_compact(note_to_self)`: saves the note (1 to 24,000 chars), ends the turn, compacts before the run settles, returns the note verbatim as the next message in the same run (a failed compaction is retried in that same run before it settles, the last time with Pi's built-in summary; if every attempt fails, `lockTools` decides: on, the tools stay locked at the cutoff with the note saved; off, the note comes back uncompacted and the tools unlock). Refuses when Pi would find nothing to compact (the session still fits inside `keepRecentTokens`).
 - `view_context()`: the agent's own gauge as JSON: used tokens, percent, window, level, the three thresholds, tokens left before each, lock state, cycle count. Allowed even while other tools are locked.
 - `/self-compact-info`: settings, resolved thresholds, usage, state, cycles, prompt sources, pending note. No model turn.
 - `/self-compact on|off`: turns the nudges off for the rest of the session — guidance, threshold entries, notifications and the tool lock all stand down, and a lock already in force is released. The footer keeps publishing the real numbers and its phase tag reads `OFF`, so a muted session is not a silent one. Runtime only: `/reload` or a new session re-arms them, and the setting stays available as `selfCompact.lockTools: false` for a permanently advisory setup.
@@ -62,6 +62,7 @@ extensions/self-compact/
   context-bar.ts    20-cell bar renderer
   prompts.ts        prompt lookup, templating, precedence, built-in fallbacks
   summary.ts        native compaction call with the replacement prompt; nothing-to-compact check
+  builtin-summary.ts Pi's own compaction summary, from inside a hook (the last attempt)
   state.ts          state snapshot, durable handoff id, recovery reducer
 .pi/self-compact/   the prompt files above
 tests/              unit, parity, harness (scripted provider, RPC client), e2e
