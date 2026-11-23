@@ -534,6 +534,15 @@ test('P2: a summary cut off while thinking is retried once with thinking off, no
   assert.equal(h.requests[1].options.reasoningEffort, undefined);
 });
 
+test('P2: a summary still cut off without thinking is not sent again as is', async t => {
+  const h = await host(t);
+  const complete = h.ctx.modelRegistry.complete;
+  h.ctx.modelRegistry.complete = async (...args) => ({ ...(await complete(...args)), content: [{ type: 'text', text: 'Partial' }], stopReason: 'length' });
+  assert.deepEqual(await h.emit('session_before_compact', summaryEvent()), { cancel: true });
+  assert.equal(h.requests.length, 2, 'one with thinking, one without, and no repeat of the pair');
+  assert.match(h.notices.at(-1).message, /output token cap even with thinking off/);
+});
+
 test('P2: empty, truncated and tool-calling summaries never become checkpoints', async t => {
   for (const response of [
     { content: [], stopReason: 'stop' },

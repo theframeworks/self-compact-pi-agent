@@ -24,6 +24,19 @@ type FileOperations = Preparation["fileOps"];
  * full output ceiling; Pi clamps that to the room actually left. */
 const SUMMARY_OUTPUT_RESERVE = 16_384;
 
+/** Characters per token when sizing the summary input. 4 is the usual estimate for prose; code and JSON run closer to
+ * 3, and overestimating the room would push the input past the window, leaving Pi no room to clamp the output into. */
+const CHARS_PER_TOKEN = 3;
+
+/** The summary was cut off by the output cap even with thinking off. Sending the same request again would be cut off
+ * the same way, so callers should not retry it. */
+export class SummaryCutOffError extends Error {
+	constructor() {
+		super("Summary generation hit the output token cap even with thinking off, so the summary is incomplete.");
+		this.name = "SummaryCutOffError";
+	}
+}
+
 /** The files a message's tool calls read, wrote or edited, as Pi records them in a compaction (calls made from a
  * codemode script are recorded on the script's tool result). */
 function addFileOps(message: AgentMessage, fileOps: FileOperations) {
@@ -228,7 +241,7 @@ export async function generateSummary(event: SummaryInput, ctx: ExtensionContext
 			// that ceiling is 64k-128k on current models (on some close to the context window), and
 			// reserving all of it would cut the session down to a sliver before the summarizer saw it.
 			const outputReserve = Math.min(requestedMaxTokens, SUMMARY_OUTPUT_RESERVE);
-			const budgetChars = Math.max(8000, (model.contextWindow - outputReserve - 2000) * 4 - system.text.length - userInstructions.length);
+			const budgetChars = Math.max(8000, (model.contextWindow - outputReserve - 2000) * CHARS_PER_TOKEN - system.text.length - userInstructions.length);
 			// Reasoning models on openai-completions summarize at low effort whatever the session's level (a summary
 			// is not worth a long thinking pass); every other model follows the session, as Pi's own summary does.
 			const reasoning = model.api === "openai-completions" && model.reasoning ? "low" as const : options?.reasoning;
@@ -263,6 +276,7 @@ export async function generateSummary(event: SummaryInput, ctx: ExtensionContext
 				response = await attempt(false);
 			}
 			if (event.signal.aborted || response.stopReason === "aborted") throw new Error("Compaction summary cancelled.");
+			if (response.stopReason === "length") throw new SummaryCutOffError();
 			if (response.stopReason !== "error" && !response.content.some(block => block.type === "text" && block.text.trim())) throw new Error("Summary response was empty.");
 			const stream = createAssistantMessageEventStream();
 			stream.end(response);
