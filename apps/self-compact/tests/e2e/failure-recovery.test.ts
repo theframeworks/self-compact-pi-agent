@@ -17,6 +17,15 @@ function notifies(events: RpcEvent[], pattern: RegExp): RpcEvent[] {
 	return eventsOfType(events, "extension_ui_request").filter((e) => e.method === "notify" && pattern.test(String(e.message ?? "")));
 }
 
+/** The handoff as the run commits it: an appended entry, not a message pushed into a new run. */
+const isHandoffEntry = (e: RpcEvent): boolean =>
+	e.type === "entry_appended" && (e.entry as { customType?: string } | undefined)?.customType === "self-compact-handoff";
+
+/** A handoff pushed with pi.sendMessage(..., { triggerTurn: true }), which starts a second run. */
+function handoffMessages(events: RpcEvent[]): RpcEvent[] {
+	return eventsOfType(events, "message_end").filter((e) => (e.message as { customType?: string })?.customType === "self-compact-handoff");
+}
+
 function traceNotes(traceFile: string): string[] {
 	return readFileSync(traceFile, "utf8")
 		.trim()
@@ -48,6 +57,73 @@ test("compaction that keeps failing falls back to Pi's summary, then returns the
 		assert.equal(eventsOfType(events, "compaction_end").filter((e) => e.aborted === false && !e.errorMessage).length, 0, "nothing was compacted");
 		assert.equal(messageText(handoff.message), traceNotes(t.traceFile).pop(), "the note came back verbatim");
 		assert.equal(readFileSync(join(t.dir, "result.txt"), "utf8").trim(), "done", "the work resumed from the note");
+	} finally {
+		await client.close();
+	}
+});
+
+test("a summary that fails once is retried inside the run: nothing settles before the note is back", async () => {
+	const t = makeTestDir("failure-in-run-retry");
+	const client = new RpcClient({
+		args: scriptedArgs(t, PERCENT_FLAGS),
+		cwd: t.dir,
+		// Two failing summary calls: the first attempt (two tries with our prompt) fails, the retry succeeds.
+		env: { ...DEFAULT_FAKE_ENV, SC_FAKE_SCENARIO: "ignore-until-forced", SC_FAKE_TRACE: t.traceFile, SC_FAKE_SUMMARY_FAIL: "2" },
+		logFile: t.logFile,
+	});
+	try {
+		await client.request({ type: "prompt", message: "Start the scripted work." });
+		const handoff = await client.waitFor(isHandoffEntry, 120_000);
+		const handoffIndex = client.events.indexOf(handoff);
+		assert.equal(
+			eventsOfType(client.events.slice(0, handoffIndex), "agent_settled").length,
+			0,
+			"the run must not settle while the note waits: the retry belongs to agent_before_settle",
+		);
+		await client.waitFor((e) => e.type === "tool_execution_end" && e.toolName === "write" && e.isError === false, 60_000, { since: handoffIndex });
+		await client.waitFor((e) => e.type === "agent_settled", 60_000, { since: handoffIndex });
+		const events = client.events;
+		assert.equal(notifies(events, /Summary generation failed after 2 attempts: .*fake summary failure/).length, 1, "the first attempt failed");
+		assert.equal(notifies(events, /uses Pi's built-in summary/).length, 0, "the retry still used our prompt");
+		assert.equal(handoffMessages(events).length, 0, "the note was never pushed into a second run with sendMessage");
+		assert.equal(eventsOfType(events, "agent_settled").length, 1, "one run: compaction, note and continuation all happened inside it");
+		assert.equal(eventsOfType(events, "compaction_start").length, 0, "the retry did not go through ctx.compact()");
+		const compactions = eventsOfType(events, "entry_appended").filter((e) => (e.entry as { type?: string }).type === "compaction");
+		assert.equal(compactions.length, 1, "exactly one compaction entry, committed by the hook");
+		assert.equal(messageText(handoff.entry), traceNotes(t.traceFile).pop(), "the note came back verbatim");
+		assert.equal(readFileSync(join(t.dir, "result.txt"), "utf8").trim(), "done", "the work resumed from the note");
+	} finally {
+		await client.close();
+	}
+});
+
+test("with lockTools on, a summarizer that fails every way stops the run inside the hook with the note saved", async () => {
+	const t = makeTestDir("failure-lock-stop");
+	const client = new RpcClient({
+		args: scriptedArgs(t, PERCENT_FLAGS),
+		cwd: t.dir,
+		env: { ...DEFAULT_FAKE_ENV, SC_FAKE_SCENARIO: "ignore-until-forced", SC_FAKE_TRACE: t.traceFile, SC_FAKE_SUMMARY_FAIL: "99" },
+		logFile: t.logFile,
+	});
+	try {
+		await client.request({ type: "prompt", message: "Start the scripted work." });
+		const stopped = await client.waitFor((e) => e.type === "extension_ui_request" && e.method === "notify" && /Tools stay locked \(selfCompact\.lockTools\)/.test(String(e.message)), 120_000);
+		const stoppedIndex = client.events.indexOf(stopped);
+		assert.equal(eventsOfType(client.events.slice(0, stoppedIndex), "agent_settled").length, 0, "every attempt and the give-up happened before the run settled");
+		await client.waitFor((e) => e.type === "agent_settled", 60_000, { since: stoppedIndex });
+		const events = client.events;
+		assert.equal(notifies(events, /Summary generation failed after 2 attempts: .*fake summary failure/).length, 2, "two attempts with our prompt");
+		assert.equal(notifies(events, /uses Pi's built-in summary/).length, 1, "and one with Pi's built-in summary");
+		assert.equal(handoffMessages(events).length, 0, "the note is kept, not returned");
+		assert.equal(client.events.filter(isHandoffEntry).length, 0);
+		assert.equal(eventsOfType(events, "compaction_start").length, 0, "nothing was retried through ctx.compact()");
+		const entries = await client.request({ type: "get_entries" });
+		const states = ((entries.data as { entries?: Array<{ type: string; customType?: string; data?: { locked?: boolean; handoff?: { status?: string; attempts?: number } } }> })?.entries ?? [])
+			.filter((e) => e.type === "custom" && e.customType === "self-compact-state");
+		const last = states[states.length - 1]!;
+		assert.equal(last.data?.handoff?.status, "failed");
+		assert.equal(last.data?.handoff?.attempts, 3, "all three attempts were spent inside the hook");
+		assert.equal(last.data?.locked, true, "the tools stay locked with the note saved");
 	} finally {
 		await client.close();
 	}
