@@ -38,7 +38,7 @@ import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAgentDir, type CompactionResult, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { compactionSettings, generateSummary, hasCompactionMaterial, keepRecentTokens, prepareHandoffCompaction, type SummaryInput } from "./summary.ts";
+import { compactionSettings, generateSummary, hasCompactionMaterial, keepRecentTokens, prepareHandoffCompaction, SummaryCutOffError, type SummaryInput } from "./summary.ts";
 import { generateBuiltinSummary } from "./builtin-summary.ts";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
@@ -1072,6 +1072,12 @@ export default function selfCompact(pi: ExtensionAPI) {
 			} catch (error) {
 				lastError = error instanceof Error ? error.message : String(error);
 				if (input.signal.aborted) return undefined;
+				// A cut-off was already retried without thinking; the same request again would be cut off the same way.
+				if (error instanceof SummaryCutOffError) {
+					R.lastCompactionError = `Summary generation failed: ${lastError}`;
+					notify(ctx, `self-compact: ${R.lastCompactionError}`, "error");
+					return { error: R.lastCompactionError };
+				}
 			}
 		}
 		R.lastCompactionError = `Summary generation failed after ${SUMMARY_ATTEMPTS} attempts: ${lastError}`;
