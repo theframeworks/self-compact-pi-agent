@@ -67,14 +67,16 @@ test("real model: forced lock -> self_compact -> compaction -> note verbatim -> 
 		const note = (args.note_to_self ?? "").trim();
 		assert.ok(note.length > 20, "model wrote a real note");
 
-		const compactionEnd = await client.waitFor((e) => e.type === "compaction_end", 240_000, { since: client.events.indexOf(selfCompact) });
-		assert.equal(compactionEnd.aborted, false, JSON.stringify(compactionEnd).slice(0, 500));
-		const summary = ((compactionEnd.result as { summary?: string })?.summary) ?? "";
+		// The handoff compacts inside the run (agent_before_settle), and Pi commits that compaction without a
+		// compaction_end event: the committed entry is the proof.
+		const compactionEnd = await client.waitFor((e) => e.type === "entry_appended" && (e.entry as { type?: string } | undefined)?.type === "compaction", 240_000, { since: client.events.indexOf(selfCompact) });
+		const compactionEntry = compactionEnd.entry as { summary?: string; tokensBefore?: number };
+		const summary = compactionEntry.summary ?? "";
 		assert.ok(summary.length > 50, "summary generated");
 		assert.match(summary, /Goal/i, "summary follows our structured compaction prompt");
 
-		const handoff = await client.waitFor((e) => e.type === "message_end" && (e.message as { customType?: string })?.customType === "self-compact-handoff", 60_000, { since: client.events.indexOf(compactionEnd) });
-		assert.equal(messageText(handoff.message), note, "note returned verbatim as the whole message");
+		const handoff = await client.waitFor((e) => (e.type === "message_end" && (e.message as { customType?: string })?.customType === "self-compact-handoff") || (e.type === "entry_appended" && (e.entry as { customType?: string } | undefined)?.customType === "self-compact-handoff"), 60_000, { since: client.events.indexOf(compactionEnd) });
+		assert.equal(messageText((handoff.message ?? handoff.entry) as never), note, "note returned verbatim as the whole message");
 
 		const write = await client.waitFor((e) => e.type === "tool_execution_end" && e.toolName === "write" && e.isError === false, 240_000, { since: client.events.indexOf(handoff) });
 		await client.waitFor((e) => e.type === "agent_settled", 120_000, { since: client.events.indexOf(write) });
@@ -96,8 +98,7 @@ test("real model: forced lock -> self_compact -> compaction -> note verbatim -> 
 					noteChars: note.length,
 					blockedToolCalls: blocked.map((e) => e.toolName),
 					compactionSummary: summary,
-					tokensBefore: (compactionEnd.result as { tokensBefore?: number })?.tokensBefore,
-					estimatedTokensAfter: (compactionEnd.result as { estimatedTokensAfter?: number })?.estimatedTokensAfter,
+					tokensBefore: compactionEntry.tokensBefore,
 					result: readFileSync(resultPath, "utf8"),
 				},
 				null,
