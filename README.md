@@ -195,6 +195,7 @@ self-compact/
 │   │   ├─ context-bar.ts                # 20-cell bar renderer
 │   │   ├─ prompts.ts                    # prompt lookup, templating, precedence
 │   │   ├─ summary.ts                    # native compaction call with the replacement summary prompt
+│   │   ├─ builtin-summary.ts            # Pi's own summary from inside the hook (the last handoff attempt)
 │   │   └─ state.ts                      # state snapshot, durable handoff id, recovery
 │   ├─ .pi/self-compact/                 # three editable prompt files (live values via {{placeholders}})
 │   ├─ tests/                            # unit, harness (scripted provider + RPC client), e2e
@@ -221,7 +222,7 @@ just real                              # live run on openrouter/deepseek/deepsee
 just verify                            # every deterministic check; logs land in apps/self-compact/verification/ (gitignored)
 ```
 
-Inside Pi: `/self-compact-info` (settings, thresholds, usage, state, cycles, prompt sources, pending note) and `/self-compact-now` (asks the agent to write its note and call the tool, reusing a saved note on retry). Built-in `/compact` is untouched and uses the same summary override. The agent gets two tools: `self_compact(note_to_self)` and `view_context()`, which returns its usage, percent, and thresholds as JSON.
+Inside Pi: `/self-compact-info` (settings, thresholds, usage, state, cycles, prompt sources, pending note), `/self-compact on|off` (mutes the nudges and the tool lock for the rest of the session) and `/self-compact-now` (asks the agent to write its note and call the tool, reusing a saved note on retry). Built-in `/compact` is untouched and uses the same summary override. The agent gets two tools: `self_compact(note_to_self)` and `view_context()`, which returns its usage, percent, and thresholds as JSON.
 
 **Defaults and how to change them.** The shipped thresholds are one constants file: [`apps/self-compact/extensions/self-compact/defaults.ts`](apps/self-compact/extensions/self-compact/defaults.ts).
 

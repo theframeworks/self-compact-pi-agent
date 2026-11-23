@@ -56,15 +56,15 @@ No npm dependencies: Pi's loader supplies its packages at runtime and Node 24 st
 
 ```
 extensions/self-compact/
-  self-compact.ts   entry: flags, tools, commands, events, footer, handoff
-  defaults.ts       shipped thresholds (100k / 140k / 170k tokens) and the 90% cap
-  thresholds.ts     parse (tokens / k / m / %), validate, resolve against the window, level
-  context-bar.ts    20-cell bar renderer
-  prompts.ts        prompt lookup, templating, precedence, built-in fallbacks
-  summary.ts        native compaction call with the replacement prompt; nothing-to-compact check
+  self-compact.ts    entry: flags, tools, commands, events, footer, handoff
+  defaults.ts        shipped thresholds (100k / 140k / 170k tokens) and the 90% cap
+  thresholds.ts      parse (tokens / k / m / %), validate, resolve against the window, level
+  context-bar.ts     20-cell bar renderer
+  prompts.ts         prompt lookup, templating, precedence, built-in fallbacks
+  summary.ts         native compaction call with the replacement prompt; nothing-to-compact check
   builtin-summary.ts Pi's own compaction summary, from inside a hook (the last attempt)
-  state.ts          state snapshot, durable handoff id, recovery reducer
-.pi/self-compact/   the prompt files above
-tests/              unit, parity, harness (scripted provider, RPC client), e2e
-scripts/            verify.sh, tui-smoke.sh
+  state.ts           state snapshot, durable handoff id, recovery reducer
+.pi/self-compact/    the prompt files above
+tests/               unit, parity, harness (scripted provider, RPC client), e2e
+scripts/             verify.sh, tui-smoke.sh
 ```
