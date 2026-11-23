@@ -270,22 +270,64 @@ test('P1: a projection carrying a context edit is left to Pi\'s own preparation'
   assert.equal(h.compactions.length, 0, 'and no compaction was committed in the run');
 });
 
-test('P1: a failed in-run handoff is retried once idle, and leaves the last attempt to that path', async t => {
+test('P1: a failed in-run handoff is retried in the same hook, last attempt included', async t => {
   const h = await host(t);
   h.usage(120000);
   await h.emit('turn_end');
   await h.execute();
+  // Our replacement prompt cannot be written, so attempts 1 and 2 fail without reaching the model.
   h.prompt('COMPACTION_MESSAGE', '  ');
-  const settle = () => h.emit('agent_before_settle', { entries: [], continue: false, outcome: 'completed' });
   const state = () => h.entries.filter(entry => entry.customType === 'self-compact-state').at(-1).data;
-  assert.equal(await settle(), undefined);
-  assert.equal(state().handoff.status, 'failed');
+  const result = await h.emit('agent_before_settle', { entries: [], continue: false, outcome: 'completed' });
+  assert.equal(result.continue, true, 'the retries happened before the run settled');
+  assert.deepEqual(result.entries.map(e => e.type), ['compaction', 'custom_message']);
+  assert.equal(result.entries[0].details.selfCompact.promptSource, 'pi-builtin', 'the last attempt is Pi\'s built-in summary');
+  assert.equal(result.entries[0].details.selfCompact.attempt, 3);
+  assert.ok(h.notices.some(n => /uses Pi's built-in summary/.test(n.message)));
+  assert.ok(h.notices.some(n => /retrying automatically/.test(n.message)));
+  assert.equal(state().handoff.status, 'ready');
+  assert.equal(h.compactions.length, 0, 'nothing was deferred to ctx.compact()');
+  assert.equal(h.messages.filter(m => m.customType === 'self-compact-handoff').length, 0, 'the note rides the run, it does not start one');
+});
+
+test('P1: a hook that cannot compact at all obeys lockTools without settling first', async t => {
+  for (const lockTools of [true, false]) {
+    const h = await host(t, {}, { compaction: { keepRecentTokens: 100 }, selfCompact: { lockTools } });
+    h.usage(120000);
+    await h.emit('turn_end');
+    await h.execute();
+    h.prompt('COMPACTION_MESSAGE', '  ');
+    h.ctx.modelRegistry.complete = async () => { throw new Error('provider down'); };
+    const state = () => h.entries.filter(entry => entry.customType === 'self-compact-state').at(-1).data;
+    const result = await h.emit('agent_before_settle', { entries: [], continue: false, outcome: 'completed' });
+    assert.equal(state().handoff.attempts, 3, `lockTools ${lockTools}: every attempt was spent in the hook`);
+    assert.equal(h.compactions.length, 0, `lockTools ${lockTools}: no idle retry was scheduled`);
+    if (lockTools) {
+      assert.equal(result, undefined, 'the run stops at the cutoff');
+      assert.equal(state().locked, true);
+      assert.equal(state().handoff.status, 'failed', 'the note is kept for a retry');
+      assert.ok(h.notices.some(n => /Tools stay locked \(selfCompact\.lockTools\)/.test(n.message)));
+    } else {
+      assert.equal(result.continue, true, 'the note comes back in the run that saved it');
+      assert.deepEqual(result.entries.map(e => e.type), ['custom_message'], 'uncompacted: the note alone');
+      assert.equal(result.entries[0].content, 'NEXT ACTION: continue');
+      assert.equal(state().locked, false);
+      assert.equal(state().handoff.status, 'ready');
+    }
+  }
+});
+
+test('P1: an aborted run leaves the handoff to the idle path', async t => {
+  const h = await host(t);
+  h.usage(120000);
+  await h.emit('turn_end');
+  await h.execute();
+  const state = () => h.entries.filter(entry => entry.customType === 'self-compact-state').at(-1).data;
+  assert.equal(await h.emit('agent_before_settle', { entries: [], continue: false, outcome: 'aborted' }), undefined);
+  assert.equal(state().handoff.status, 'pending', 'an abort is not an attempt');
+  assert.equal(h.compactions.length, 0);
   await h.emit('agent_settled');
-  assert.equal(h.compactions.length, 1, 'the idle retry started');
-  await h.emit('session_compact_failed', { reason: 'manual', aborted: true });
-  assert.equal(state().handoff.attempts, 2);
-  assert.equal(await settle(), undefined, 'the in-run path skips the last attempt');
-  assert.equal(state().handoff.attempts, 2, 'and does not use it up');
+  assert.equal(h.compactions.length, 1, 'the compaction runs once the agent is idle');
 });
 
 test('P1: a successful in-run handoff after a give-up re-arms the guidance', async t => {
