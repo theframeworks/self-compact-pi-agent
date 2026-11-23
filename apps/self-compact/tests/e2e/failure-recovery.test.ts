@@ -1,8 +1,8 @@
 /**
- * Failure and recovery: a failing summarizer keeps the note and the lock while retries remain,
- * /self-compact-now includes the saved note verbatim, a restart with --session restores the handoff
- * and finishes it once the summarizer works again, and when every attempt fails with lockTools off the note
- * comes back uncompacted so the work goes on.
+ * Failure and recovery: a failing summarizer keeps the note and the lock while retries remain, every automatic
+ * attempt is spent inside the run that saved the note, /self-compact-now includes the saved note verbatim, a restart
+ * with --session restores the handoff and finishes it once the summarizer works again, and when every attempt fails
+ * with lockTools off the note comes back uncompacted so the work goes on.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -48,14 +48,15 @@ test("compaction that keeps failing falls back to Pi's summary, then returns the
 	});
 	try {
 		await client.request({ type: "prompt", message: "Start the scripted work." });
-		const handoff = await client.waitFor((e) => e.type === "message_end" && (e.message as { customType?: string })?.customType === "self-compact-handoff", 90_000);
+		const handoff = await client.waitFor(isHandoffEntry, 90_000);
 		await client.waitFor((e) => e.type === "tool_execution_end" && e.toolName === "write" && e.isError === false, 30_000, { since: client.events.indexOf(handoff) });
 		const events = client.events;
-		assert.ok(notifies(events, /Summary generation failed after 2 attempts: .*fake summary failure/).length >= 2, "our summary was tried in the turn and once idle");
+		assert.ok(notifies(events, /Summary generation failed after 2 attempts: .*fake summary failure/).length >= 2, "our summary was tried twice");
 		assert.equal(notifies(events, /uses Pi's built-in summary/).length, 1, "the last attempt used Pi's summary");
 		assert.equal(notifies(events, /Returning the note without compacting and restoring tools/).length, 1);
 		assert.equal(eventsOfType(events, "compaction_end").filter((e) => e.aborted === false && !e.errorMessage).length, 0, "nothing was compacted");
-		assert.equal(messageText(handoff.message), traceNotes(t.traceFile).pop(), "the note came back verbatim");
+		assert.equal(handoffMessages(events).length, 0, "the note came back inside the run, not as a new one");
+		assert.equal(messageText(handoff.entry), traceNotes(t.traceFile).pop(), "the note came back verbatim");
 		assert.equal(readFileSync(join(t.dir, "result.txt"), "utf8").trim(), "done", "the work resumed from the note");
 	} finally {
 		await client.close();
@@ -83,7 +84,7 @@ test("a summary that fails once is retried inside the run: nothing settles befor
 		await client.waitFor((e) => e.type === "tool_execution_end" && e.toolName === "write" && e.isError === false, 60_000, { since: handoffIndex });
 		await client.waitFor((e) => e.type === "agent_settled", 60_000, { since: handoffIndex });
 		const events = client.events;
-		assert.equal(notifies(events, /Summary generation failed after 2 attempts: .*fake summary failure/).length, 1, "the first attempt failed");
+		assert.equal(notifies(events, /^self-compact: Summary generation failed after 2 attempts: .*fake summary failure/).length, 1, "the first attempt failed");
 		assert.equal(notifies(events, /uses Pi's built-in summary/).length, 0, "the retry still used our prompt");
 		assert.equal(handoffMessages(events).length, 0, "the note was never pushed into a second run with sendMessage");
 		assert.equal(eventsOfType(events, "agent_settled").length, 1, "one run: compaction, note and continuation all happened inside it");
@@ -112,7 +113,7 @@ test("with lockTools on, a summarizer that fails every way stops the run inside 
 		assert.equal(eventsOfType(client.events.slice(0, stoppedIndex), "agent_settled").length, 0, "every attempt and the give-up happened before the run settled");
 		await client.waitFor((e) => e.type === "agent_settled", 60_000, { since: stoppedIndex });
 		const events = client.events;
-		assert.equal(notifies(events, /Summary generation failed after 2 attempts: .*fake summary failure/).length, 2, "two attempts with our prompt");
+		assert.equal(notifies(events, /^self-compact: Summary generation failed after 2 attempts: .*fake summary failure/).length, 2, "two attempts with our prompt");
 		assert.equal(notifies(events, /uses Pi's built-in summary/).length, 1, "and one with Pi's built-in summary");
 		assert.equal(handoffMessages(events).length, 0, "the note is kept, not returned");
 		assert.equal(client.events.filter(isHandoffEntry).length, 0);
@@ -139,9 +140,11 @@ test("failed compaction keeps the note and the lock; /self-compact-now reuses th
 	try {
 		await first.request({ type: "prompt", message: "Start the scripted work." });
 		await first.waitFor((e) => e.type === "tool_execution_end" && e.toolName === "self_compact" && e.isError === false, 90_000);
-		// The in-turn attempt fails, then the idle one, and another retry is scheduled.
+		// Every automatic attempt runs inside the turn that saved the note; the first failure announces the retry,
+		// and the lock holds the line once they are all spent.
 		await first.waitFor((e) => e.type === "extension_ui_request" && e.method === "notify" && /retrying automatically/.test(String(e.message)), 60_000);
-		assert.ok(notifies(first.events, /Summary generation failed after 2 attempts: .*fake summary failure/).length >= 2, "real error recorded");
+		await first.waitFor((e) => e.type === "extension_ui_request" && e.method === "notify" && /Tools stay locked \(selfCompact\.lockTools\)/.test(String(e.message)), 60_000);
+		assert.ok(notifies(first.events, /^self-compact: Summary generation failed after 2 attempts: .*fake summary failure/).length >= 2, "real error recorded");
 
 		// Note retained in the session ledger (latest state snapshot), tools locked.
 		const entries = await first.request({ type: "get_entries" });
