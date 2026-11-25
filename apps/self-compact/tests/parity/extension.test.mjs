@@ -79,7 +79,7 @@ async function host(t, flags = {}, settings = { compaction: { keepRecentTokens: 
   t.after(async () => { await emit('session_shutdown'); rmSync(cwd, { recursive: true, force: true }); });
   await emit('session_start', { reason: 'start' });
   return {
-    ctx, entries, messages, notices, compactions, requests, working, emit,
+    ctx, entries, messages, notices, compactions, requests, working, emit, extension,
     usage: value => { tokens = value; },
     prompt: (kind, text) => {
       const dir = join(cwd, '.pi/self-compact');
@@ -576,6 +576,42 @@ test('P2: empty, truncated and tool-calling summaries never become checkpoints',
     h.ctx.modelRegistry.complete = async () => response;
     assert.deepEqual(await h.emit('session_before_compact', summaryEvent()), { cancel: true });
   }
+});
+
+// What a renderer draws, as plain text: colours are dropped and keybinding hints are spelled out.
+const theme = { fg: (_color, text) => text, bold: text => text };
+const draw = (component) => component.render(2000).map(line => line.trimEnd()).join('\n').trim();
+const renderOptions = expanded => ({ expanded, outputPad: 0, keyHint: (key, description) => `<${key}> ${description}`, keyText: key => `<${key}>` });
+
+test('P4: the handoff collapses to its header and NEXT ACTION, and Ctrl+O shows the whole note', async t => {
+  const h = await host(t);
+  const note = 'GOAL: ship the parser.\nDONE: wrote parser.ts.\nNEXT ACTION: run the tests,\nthen open the PR.';
+  const render = h.extension.messageRenderers.get('self-compact-handoff');
+  const message = { role: 'custom', customType: 'self-compact-handoff', content: note, display: true, details: { cycle: 2, note } };
+  const collapsed = draw(render(message, renderOptions(false), theme));
+  assert.match(collapsed, /self-compact · handoff cycle 2 · note_to_self \(\d+ chars\) returned to the agent/);
+  assert.match(collapsed, /<app\.tools\.expand> to expand/);
+  assert.match(collapsed, /NEXT ACTION: run the tests,\nthen open the PR\./, 'what happens next stays in view');
+  assert.doesNotMatch(collapsed, /GOAL|DONE/, 'the rest of the note waits for Ctrl+O');
+  const expanded = draw(render(message, renderOptions(true), theme));
+  assert.ok(expanded.includes(note), 'expanded, the whole note as the agent received it');
+});
+
+test('P4: a threshold crossing collapses to one line of numbers, and Ctrl+O shows the message the model got', async t => {
+  const h = await host(t);
+  h.usage(110000);
+  await h.emit('turn_end');
+  const entry = h.entries.filter(e => e.customType === 'self-compact-phase').at(-1);
+  assert.equal(entry.data.level, 'warning');
+  const render = h.extension.entryRenderers.get('self-compact-phase');
+  const collapsed = draw(render(entry, renderOptions(false), theme));
+  assert.equal(collapsed.split('\n').length, 1, collapsed);
+  assert.match(collapsed, /self-compact · warning · 55\.0% \(110,000 \/ 200,000 tokens\) · hard cutoff at 120,000, 10,000 tokens left/);
+  assert.match(collapsed, /<app\.tools\.expand> to expand/);
+  assert.equal(draw(render(entry, renderOptions(true), theme)), entry.data.text.trim());
+  // An entry written before the numbers were recorded still collapses, to the level and percent it has.
+  const old = { ...entry, data: { level: 'warning', percent: 55, text: entry.data.text } };
+  assert.match(draw(render(old, renderOptions(false), theme)), /^self-compact · warning · 55\.0%/);
 });
 
 test('P4: view_context returns usage, percent, and thresholds as JSON and stays allowed under the lock', async t => {
