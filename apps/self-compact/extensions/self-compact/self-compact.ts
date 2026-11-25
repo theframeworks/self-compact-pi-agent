@@ -37,7 +37,7 @@
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getAgentDir, type CompactionResult, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type AgentBeforeSettleEvent, type AgentBeforeSettleEventResult, type CompactionResult, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { compactionSettings, generateSummary, hasCompactionMaterial, keepRecentTokens, prepareHandoffCompaction, SummaryCutOffError, type SummaryInput } from "./summary.ts";
 import { generateBuiltinSummary } from "./builtin-summary.ts";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
@@ -1061,8 +1061,33 @@ export default function selfCompact(pi: ExtensionAPI) {
 		pi.sendMessage({ customType: GUIDANCE_TYPE, content: nowPrompt(), display: false }, { triggerTurn: true, deliverAs: "followUp" });
 	});
 
+	/**
+	 * Pi hides its working row at agent_end, before agent_before_settle, so the in-run handoff would leave the screen
+	 * looking idle while it writes the summary. The run is still active then, so setWorkingVisible(true) brings the row
+	 * back, in the same place, with this text. Pi does not clear it when the run settles; agent_settled does.
+	 */
+	let workingShown = false;
+	function showWorking(ctx: ExtensionContext, message: string) {
+		if (!ctx.hasUI) return;
+		ctx.ui.setWorkingMessage(message);
+		ctx.ui.setWorkingVisible(true);
+		workingShown = true;
+	}
+	/** Pi's own text again, for a run that carries on from the note; the row itself stays until the run settles. */
+	function restoreWorkingMessage(ctx: ExtensionContext) {
+		if (workingShown) ctx.ui.setWorkingMessage();
+	}
+	/** The run is over: hide the row. Turning it back on while nothing runs only re-enables it for the next run. */
+	function clearWorking(ctx: ExtensionContext) {
+		if (!workingShown) return;
+		workingShown = false;
+		ctx.ui.setWorkingVisible(false);
+		ctx.ui.setWorkingVisible(true);
+	}
+
 	pi.on("agent_settled", async (_event, ctx) => {
 		if (!R.alive) return; // shutdown during compaction: the ctx is already stale
+		clearWorking(ctx);
 		refreshUi(ctx);
 		if (inert()) return;
 		const h = handoff();
@@ -1168,6 +1193,14 @@ export default function selfCompact(pi: ExtensionAPI) {
 	 * an aborted run, and a note recovered after a reload or a crash while the agent is idle.
 	 */
 	pi.on("agent_before_settle", async (event, ctx) => {
+		try {
+			return await handoffBeforeSettle(event, ctx);
+		} finally {
+			restoreWorkingMessage(ctx);
+		}
+	});
+
+	async function handoffBeforeSettle(event: AgentBeforeSettleEvent, ctx: ExtensionContext): Promise<AgentBeforeSettleEventResult | undefined> {
 		if (!R.alive || inert() || event.outcome === "aborted" || !ctx.model) return undefined;
 		const saved = activeHandoff();
 		if (!saved || (saved.status !== "pending" && saved.status !== "failed") || saved.attempts >= MAX_HANDOFF_ATTEMPTS) return undefined;
@@ -1185,6 +1218,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 			save();
 			if (isLastAttempt(attempt)) notifyLastAttempt(ctx, h);
 			else notify(ctx, `self-compact: compacting (${attempt === 1 ? "end of turn" : `retry ${attempt}`}, note ${h.note.length} chars)…`, "info");
+			showWorking(ctx, `self-compact: compacting (attempt ${attempt}/${MAX_HANDOFF_ATTEMPTS}${isLastAttempt(attempt) ? ", Pi's built-in summary" : ""})…`);
 			refreshUi(ctx);
 			const summary = await attemptHandoffSummary(input, ctx, h, attempt);
 			R.compactionInFlight = false;
@@ -1225,7 +1259,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 			],
 			continue: true,
 		};
-	});
+	}
 
 	pi.on("session_compact", async (event, ctx) => {
 		const h = uncompactedHandoff();
