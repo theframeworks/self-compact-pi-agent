@@ -38,7 +38,7 @@ Values are token counts (`270000`, `100k`, `1.5m`) or, where a share of the wind
 | `USER_PROMPT_COMPACTION_MESSAGE.md` | system prompt of the summary call (`--compact-prompt` overrides it) |
 | `USER_PROMPT_SUMMARY_INSTRUCTIONS.md` | optional: replaces Pi's user instructions for the summary call |
 
-Placeholders: `{{used_tokens}}`, `{{used_percent}}`, `{{context_window}}`, `{{cached_tokens}}`, `{{soft_tokens}}`, `{{soft_percent}}`, `{{warning_tokens}}`, `{{warning_percent}}`, `{{forced_tokens}}`, `{{forced_percent}}`, `{{remaining_to_forced}}`, `{{cycle}}`, `{{note_max_chars}}`. Each threshold crossing also prints the rendered message once in the TUI. Empty or unreadable override files report an error instead of silently falling back.
+Placeholders: `{{used_tokens}}`, `{{used_percent}}`, `{{context_window}}`, `{{cached_tokens}}`, `{{soft_tokens}}`, `{{soft_percent}}`, `{{warning_tokens}}`, `{{warning_percent}}`, `{{forced_tokens}}`, `{{forced_percent}}`, `{{remaining_to_forced}}`, `{{cycle}}`, `{{note_max_chars}}`. Each threshold crossing also prints the rendered message once in the TUI, collapsed to one line of numbers until Ctrl+O expands it; the handoff collapses the same way, to its header and the note's NEXT ACTION. Empty or unreadable override files report an error instead of silently falling back.
 
 ## Tests
 
