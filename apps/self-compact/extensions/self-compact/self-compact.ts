@@ -176,6 +176,40 @@ function levelColor(level: UsageLevel): "dim" | "accent" | "warning" | "error" |
 	return level === "idle" ? "dim" : "muted";
 }
 
+/** What a threshold crossing records: the level and the numbers at that moment, and the message the model got. */
+interface PhaseEntryData {
+	level?: UsageLevel;
+	tokens?: number | null;
+	percent?: number | null;
+	contextWindow?: number;
+	warnTokens?: number;
+	forcedTokens?: number;
+	text?: string;
+}
+
+/** A threshold crossing in one line: where usage stood and how far the next line was. */
+function phaseLine(data: PhaseEntryData | undefined): string {
+	const level = data?.level ?? "notice";
+	const n = (value: number) => value.toLocaleString("en-US");
+	const parts = [`self-compact · ${level === "forced" ? "hard cutoff" : levelTag(level).toLowerCase()} · ${formatPct(data?.percent ?? null, 1)}`];
+	const { tokens, contextWindow, warnTokens, forcedTokens } = data ?? {};
+	if (typeof tokens === "number" && contextWindow) parts[0] += ` (${n(tokens)} / ${n(contextWindow)} tokens)`;
+	if (level === "notice" && warnTokens) parts.push(`warning at ${n(warnTokens)}`);
+	if (level === "notice" && forcedTokens) parts.push(`hard cutoff at ${n(forcedTokens)}`);
+	if (level === "warning" && forcedTokens) parts.push(`hard cutoff at ${n(forcedTokens)}${typeof tokens === "number" ? `, ${n(Math.max(0, forcedTokens - tokens))} tokens left` : ""}`);
+	if (level === "forced") parts.push(`tools locked until ${TOOL_NAME}`);
+	return parts.join(" · ");
+}
+
+/** The note's NEXT ACTION, from its last line that starts one to the end of the note. */
+function nextAction(note: string): string | undefined {
+	const lines = note.trimEnd().split("\n");
+	for (let i = lines.length - 1; i >= 0; i--) {
+		if (/^[\s>*#-]*\**NEXT ACTION\b/i.test(lines[i]!)) return lines.slice(i).join("\n");
+	}
+	return undefined;
+}
+
 function levelTag(level: UsageLevel): string {
 	if (level === "notice") return "NOTICE";
 	if (level === "warning") return "WARNING";
@@ -441,7 +475,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 			let text: string | undefined;
 			try { text = renderGuidance(level); }
 			catch { text = renderTemplate(level === "forced" ? FORCED_PROMPT : BUILTIN_PROMPTS[level === "notice" ? "soft" : "warning"], templateValues()); }
-			pi.appendEntry(PHASE_ENTRY_TYPE, { level, tokens: R.usage.tokens, percent: R.usage.percent, text, at: Date.now() });
+			pi.appendEntry(PHASE_ENTRY_TYPE, { level, tokens: R.usage.tokens, percent: R.usage.percent, contextWindow: R.thresholds?.contextWindow, warnTokens: R.thresholds?.warnTokens, forcedTokens: R.thresholds?.forcedTokens, text, at: Date.now() });
 			if (ctx.mode !== "tui") notify(ctx, `self-compact: ${levelTag(level).toLowerCase()} threshold crossed at ${formatPct(R.usage.percent, 1)}${level === "forced" ? `; tools locked until ${TOOL_NAME} runs` : ""}`, level === "forced" ? "error" : level === "warning" ? "warning" : "info");
 		}
 	}
@@ -838,20 +872,26 @@ export default function selfCompact(pi: ExtensionAPI) {
 
 	// ------------------------------------------------------------- renderers
 
+	// Both render collapsed by default, like Pi's own compaction block: Ctrl+O (app.tools.expand) shows the full text.
 	pi.registerMessageRenderer(HANDOFF_TYPE, (message, options, theme) => {
 		const details = message.details as { cycle?: number; note?: string } | undefined;
 		const note = details?.note ?? (typeof message.content === "string" ? message.content : "");
-		// Always show the full note: this is exactly what was fed back into the agent after compaction.
-		const header = theme.fg("success", theme.bold(`self-compact · handoff`)) + theme.fg("dim", ` cycle ${details?.cycle ?? "?"}, note_to_self returned verbatim to the agent (${note.length.toLocaleString("en-US")} chars):`);
-		return new Text(`${header}\n${theme.fg("text", note)}`, options.outputPad ?? 1, 0);
+		const header = theme.fg("success", theme.bold(`self-compact · handoff`)) + theme.fg("dim", ` cycle ${details?.cycle ?? "?"} · note_to_self (${note.length.toLocaleString("en-US")} chars) returned to the agent`);
+		// Expanded: exactly what was fed back into the agent after compaction.
+		if (options.expanded) return new Text(`${header}\n${theme.fg("text", note)}`, options.outputPad ?? 1, 0);
+		const next = nextAction(note);
+		const hint = theme.fg("dim", ` (${options.keyHint("app.tools.expand", "to expand")})`);
+		return new Text(`${header}${hint}${next ? `\n${theme.fg("text", next)}` : ""}`, options.outputPad ?? 1, 0);
 	});
 
-	pi.registerEntryRenderer(PHASE_ENTRY_TYPE, (entry, _options, theme) => {
-		const data = entry.data as { level?: UsageLevel; percent?: number | null; text?: string } | undefined;
+	pi.registerEntryRenderer(PHASE_ENTRY_TYPE, (entry, options, theme) => {
+		const data = entry.data as PhaseEntryData | undefined;
 		const level = data?.level ?? "notice";
-		// Show the full guidance message the model receives, once per crossing (older entries fall back to the one-liner).
-		const text = data?.text?.trim() || `self-compact · ${levelTag(level).toLowerCase()} threshold crossed at ${formatPct(data?.percent ?? null, 1)}`;
-		return new Text(theme.fg(levelColor(level), text), 0, 0);
+		// Expanded: the full guidance message the model received at this crossing (older entries have only the numbers).
+		const full = data?.text?.trim();
+		if (options.expanded && full) return new Text(theme.fg(levelColor(level), full), 0, 0);
+		const hint = full ? theme.fg("dim", ` (${options.keyHint("app.tools.expand", "to expand")})`) : "";
+		return new Text(theme.fg(levelColor(level), phaseLine(data)) + hint, 0, 0);
 	});
 
 	pi.registerEntryRenderer(INFO_ENTRY_TYPE, (entry, _options, theme) => {
