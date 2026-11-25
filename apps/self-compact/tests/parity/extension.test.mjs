@@ -38,7 +38,7 @@ async function host(t, flags = {}, settings = { compaction: { keepRecentTokens: 
   const loaded = await loadExtensions([entry], cwd);
   assert.deepEqual(loaded.errors, []);
   const extension = loaded.extensions[0];
-  const entries = seedEntries(), messages = [], notices = [], compactions = [], requests = [];
+  const entries = seedEntries(), messages = [], notices = [], compactions = [], requests = [], working = [];
   let tokens = 0;
   let footer;
   for (const [key, value] of Object.entries({ 'compact-soft-at': '20%', 'compact-at': '50%', 'compact-buffer': '10%', ...flags })) loaded.runtime.flagValues.set(key, value);
@@ -51,7 +51,8 @@ async function host(t, flags = {}, settings = { compaction: { keepRecentTokens: 
     getContextUsage: () => ({ tokens, contextWindow: ctx.model.contextWindow, percent: tokens / ctx.model.contextWindow * 100 }),
     isIdle: () => true,
     compact: options => compactions.push(options),
-    ui: { notify: (message, type) => notices.push({ message, type }), setFooter: factory => { footer = factory; }, setStatus() {} },
+    ui: { notify: (message, type) => notices.push({ message, type }), setFooter: factory => { footer = factory; }, setStatus() {},
+      setWorkingMessage: message => working.push(['message', message]), setWorkingVisible: visible => working.push(['visible', visible]) },
     modelRegistry: { complete: async (_model, request, options) => {
       requests.push({ request, options });
       return { role: 'assistant', api: 'openai-completions', provider: 'fake', model: 'parity-model', timestamp: 1, stopReason: 'stop', content: [{ type: 'text', text: 'Verified summary.' }], usage: { input: 10, output: 10, totalTokens: 20, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
@@ -78,7 +79,7 @@ async function host(t, flags = {}, settings = { compaction: { keepRecentTokens: 
   t.after(async () => { await emit('session_shutdown'); rmSync(cwd, { recursive: true, force: true }); });
   await emit('session_start', { reason: 'start' });
   return {
-    ctx, entries, messages, notices, compactions, requests, emit,
+    ctx, entries, messages, notices, compactions, requests, working, emit,
     usage: value => { tokens = value; },
     prompt: (kind, text) => {
       const dir = join(cwd, '.pi/self-compact');
@@ -290,6 +291,28 @@ test('P1: a failed in-run handoff is retried in the same hook, last attempt incl
   assert.equal(state().handoff.status, 'ready');
   assert.equal(h.compactions.length, 0, 'nothing was deferred to ctx.compact()');
   assert.equal(h.messages.filter(m => m.customType === 'self-compact-handoff').length, 0, 'the note rides the run, it does not start one');
+});
+
+test('P1: the in-run handoff shows its attempts on Pi\'s working row and clears it when the run settles', async t => {
+  const h = await host(t);
+  h.usage(120000);
+  await h.emit('turn_end');
+  await h.execute();
+  h.prompt('COMPACTION_MESSAGE', '  ');
+  await h.emit('agent_before_settle', { entries: [], continue: false, outcome: 'completed' });
+  // Pi hid the row at agent_end; each attempt brings it back with its own text, and Pi's text returns for the run's rest.
+  assert.deepEqual(h.working, [
+    ['message', 'self-compact: compacting (attempt 1/3)…'], ['visible', true],
+    ['message', 'self-compact: compacting (attempt 2/3)…'], ['visible', true],
+    ['message', 'self-compact: compacting (attempt 3/3, Pi\'s built-in summary)…'], ['visible', true],
+    ['message', undefined],
+  ]);
+  h.working.length = 0;
+  await h.emit('agent_settled', { aborted: false });
+  assert.deepEqual(h.working, [['visible', false], ['visible', true]], 'hidden once the run is over, and enabled for the next one');
+  h.working.length = 0;
+  await h.emit('agent_settled', { aborted: false });
+  assert.deepEqual(h.working, [], 'a run without a handoff leaves the row to Pi');
 });
 
 test('P1: a hook that cannot compact at all obeys lockTools without settling first', async t => {

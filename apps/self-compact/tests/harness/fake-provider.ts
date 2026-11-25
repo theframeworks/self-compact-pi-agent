@@ -11,6 +11,7 @@
  *   SC_FAKE_STEP          extra tokens per assistant message present in context (default 15000)
  *   SC_FAKE_SCENARIO      "ignore-until-forced" (default) | "obey-notice" | "obey-warning" | "obey-forced" | "never-compact"
  *   SC_FAKE_SUMMARY_FAIL  number of summary requests that fail before one succeeds (default 0)
+ *   SC_FAKE_SUMMARY_DELAY milliseconds each summary request takes before it answers (default 0)
  *   SC_FAKE_NOTE          note_to_self text used when the script calls self_compact
  *   SC_FAKE_NOTE_MODE     "normal" (default) | "blank" | "toolong" | "maxlen" | "whitespace"
  *   SC_FAKE_RESULT_PATH   file the script writes after the handoff (default "result.txt")
@@ -30,6 +31,7 @@ const BASE = Number(env("SC_FAKE_BASE", "5000"));
 const STEP = Number(env("SC_FAKE_STEP", "15000"));
 const SCENARIO = env("SC_FAKE_SCENARIO", "ignore-until-forced");
 const SUMMARY_FAIL = Number(env("SC_FAKE_SUMMARY_FAIL", "0"));
+const SUMMARY_DELAY = Number(env("SC_FAKE_SUMMARY_DELAY", "0"));
 const RESULT_PATH = env("SC_FAKE_RESULT_PATH", "result.txt");
 const TRACE = process.env.SC_FAKE_TRACE;
 const NOTE_MODE = env("SC_FAKE_NOTE_MODE", "normal");
@@ -286,7 +288,7 @@ function streamScripted(model: Model<any>, raw: Context, options?: SimpleStreamO
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		}
-	}, 5);
+	}, isSummary ? 5 + SUMMARY_DELAY : 5);
 	return stream;
 }
 
