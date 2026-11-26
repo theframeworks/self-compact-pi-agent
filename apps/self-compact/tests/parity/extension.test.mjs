@@ -302,9 +302,9 @@ test('P1: the in-run handoff shows its attempts on Pi\'s working row and clears 
   await h.emit('agent_before_settle', { entries: [], continue: false, outcome: 'completed' });
   // Pi hid the row at agent_end; each attempt brings it back with its own text, and Pi's text returns for the run's rest.
   assert.deepEqual(h.working, [
-    ['message', 'self-compact: compacting (attempt 1/3)…'], ['visible', true],
-    ['message', 'self-compact: compacting (attempt 2/3)…'], ['visible', true],
-    ['message', 'self-compact: compacting (attempt 3/3, Pi\'s built-in summary)…'], ['visible', true],
+    ['message', 'Self-compact: compacting (attempt 1/3)…'], ['visible', true],
+    ['message', 'Self-compact: compacting (attempt 2/3)…'], ['visible', true],
+    ['message', 'Self-compact: compacting (attempt 3/3, Pi\'s built-in summary)…'], ['visible', true],
     ['message', undefined],
   ]);
   h.working.length = 0;

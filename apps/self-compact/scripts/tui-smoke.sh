@@ -32,7 +32,7 @@ tmux send-keys -t "$SESSION" "Start the scripted work." Enter
 # must show it again, in the same place, with its own text. Watch the pane until the run has written its result.
 WORKING=""
 for _ in $(seq 1 60); do
-  ROW=$(tmux capture-pane -t "$SESSION" -p | grep -m1 'self-compact: compacting' || true)
+  ROW=$(tmux capture-pane -t "$SESSION" -p | grep -m1 'Self-compact: compacting' || true)
   [ -n "$ROW" ] && [ -z "$WORKING" ] && WORKING="$ROW"
   [ -f "$DIR/result.txt" ] && break
   sleep 0.5
@@ -62,5 +62,5 @@ tmux kill-session -t "$SESSION" 2>/dev/null || true
 echo "captured to $OUT"
 # The run must have produced the result file and a footer line with the bar.
 test -f "$DIR/result.txt" && grep -q "done" "$DIR/result.txt" && grep -Eq '\[[#=~!|-]{20}\] *[0-9-]+%' "$OUT" \
-  && grep -Eq 'self-compact: compacting \(attempt 1/3\)' <<<"$WORKING" \
-  && ! grep -q 'self-compact: compacting' <<<"$IDLE"
+  && grep -Eq 'Self-compact: compacting \(attempt 1/3\)' <<<"$WORKING" \
+  && ! grep -q 'Self-compact: compacting' <<<"$IDLE"
