@@ -1258,7 +1258,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 			save();
 			if (isLastAttempt(attempt)) notifyLastAttempt(ctx, h);
 			else notify(ctx, `self-compact: compacting (${attempt === 1 ? "end of turn" : `retry ${attempt}`}, note ${h.note.length} chars)…`, "info");
-			showWorking(ctx, `self-compact: compacting (attempt ${attempt}/${MAX_HANDOFF_ATTEMPTS}${isLastAttempt(attempt) ? ", Pi's built-in summary" : ""})…`);
+			showWorking(ctx, `Self-compact: compacting (attempt ${attempt}/${MAX_HANDOFF_ATTEMPTS}${isLastAttempt(attempt) ? ", Pi's built-in summary" : ""})…`);
 			refreshUi(ctx);
 			const summary = await attemptHandoffSummary(input, ctx, h, attempt);
 			R.compactionInFlight = false;
