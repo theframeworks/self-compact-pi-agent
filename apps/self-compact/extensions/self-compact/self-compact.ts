@@ -57,6 +57,8 @@ import {
 	type TemplateValues,
 } from "./prompts.ts";
 import {
+	GUIDANCE_TYPE,
+	guidedLevelsSinceCompaction,
 	HANDOFF_TYPE,
 	INFO_ENTRY_TYPE,
 	PHASE_ENTRY_TYPE,
@@ -89,7 +91,6 @@ const MAX_HANDOFF_ATTEMPTS = 3;
 const SUMMARY_ATTEMPTS = 2;
 /** Whether the 1-based handoff attempt `attempt` is the last automatic one, made with Pi's built-in summary. */
 const isLastAttempt = (attempt: number): boolean => attempt >= MAX_HANDOFF_ATTEMPTS;
-const GUIDANCE_TYPE = "self-compact-guidance";
 
 /**
  * The status key this extension publishes with `ctx.ui.setStatus()`, and the
@@ -456,7 +457,10 @@ export default function selfCompact(pi: ExtensionAPI) {
 		return hasCompactionMaterial(ctx.sessionManager.getBranch(), keepRecentTokens(ctx.cwd, ctx.model));
 	}
 
-	/** Called whenever usage may have changed: records crossings (TUI-only line) and engages the forced lock. */
+	/**
+	 * Called whenever usage may have changed: records crossings (TUI-only line), engages the forced lock and sends
+	 * the guidance once per crossing.
+	 */
 	function trackLevel(ctx: ExtensionContext) {
 		refreshUi(ctx);
 		if (inert() || !R.thresholds) return;
@@ -471,7 +475,8 @@ export default function selfCompact(pi: ExtensionAPI) {
 		}
 		if (LEVEL_ORDER[level] > LEVEL_ORDER[R.announcedLevel]) {
 			R.announcedLevel = level;
-			// The crossing entry carries the full guidance message the model will receive, shown once in the TUI.
+			// The crossing entry shows the guidance for this level once in the TUI, rendered now. The model's copy is sent
+			// separately below, possibly later (once there is something to compact) and so with later numbers.
 			let text: string | undefined;
 			try { text = renderGuidance(level); }
 			catch { text = renderTemplate(level === "forced" ? FORCED_PROMPT : BUILTIN_PROMPTS[level === "notice" ? "soft" : "warning"], templateValues()); }
@@ -480,7 +485,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		}
 		// Guidance waits until there is something to compact, then goes in once for the highest level reached.
 		const guided = locked() ? "forced" : level;
-		if (LEVEL_ORDER[guided] > LEVEL_ORDER[R.guidedLevel] && sendGuidance(ctx)) R.guidedLevel = guided;
+		if (LEVEL_ORDER[guided] > LEVEL_ORDER[R.guidedLevel] && sendGuidanceIfDue(ctx)) R.guidedLevel = guided;
 	}
 
 	/** The guidance message for a level, rendered from the prompt files with current usage. */
@@ -491,15 +496,16 @@ export default function selfCompact(pi: ExtensionAPI) {
 	}
 
 	/**
-	 * Puts the guidance for the level reached into the session, once; true when it is dealt with (sent, or its prompt
- * file reported broken), false when none is due yet. It is delivered before the next model call
-	 * and never changed or removed afterwards, so the prompt-cache prefix stays stable; live numbers are behind
-	 * view_context. A prompt file that fails to render is reported once, and only the warning falls back to the
+	 * Puts the guidance for the level reached into the session; true when it was sent, false when none is due yet.
+	 * It is never changed or removed afterwards, so the prompt-cache prefix stays stable; live numbers are behind
+	 * view_context. Sent with triggerTurn false: during a run it is appended when the current turn ends and so reaches
+	 * the next model call without starting a turn of its own; while idle it is appended at once. A prompt file that
+	 * fails to render is reported once and retried on the next check, and only the warning falls back to the
 	 * built-in text.
 	 */
-	function sendGuidance(ctx: ExtensionContext): boolean {
+	function sendGuidanceIfDue(ctx: ExtensionContext): boolean {
+		const level = locked() ? "forced" : R.level;
 		let text: string | undefined;
-		let failed = false;
 		try {
 			text = guidanceText(ctx);
 		} catch (error) {
@@ -508,11 +514,11 @@ export default function selfCompact(pi: ExtensionAPI) {
 				R.promptErrors.add(message);
 				notify(ctx, `self-compact: ${message}`, "warning");
 			}
-			failed = true;
-			if (R.level === "warning") text = renderTemplate(BUILTIN_PROMPTS.warning, templateValues());
+			if (level === "warning") text = renderTemplate(BUILTIN_PROMPTS.warning, templateValues());
 		}
-		if (text) pi.sendMessage({ customType: GUIDANCE_TYPE, content: text, display: false }, { deliverAs: "steer" });
-		return Boolean(text) || failed;
+		if (!text) return false;
+		pi.sendMessage({ customType: GUIDANCE_TYPE, content: text, display: false, details: { level } }, { triggerTurn: false });
+		return true;
 	}
 
 	/** The guidance for the current level, or undefined when none is due. */
@@ -537,10 +543,15 @@ export default function selfCompact(pi: ExtensionAPI) {
 	/** The context shrank or the session (re)started: the level, the lock and the guidance re-arm from scratch. */
 	function rearm() {
 		R.epoch += 1;
-		R.announcedLevel = "idle";
-		R.guidedLevel = "idle";
+		rearmAnnouncements();
 		R.compactionInFlight = false;
 		R.standingDown = false;
+	}
+
+	/** The next check announces the level reached and sends its guidance again. */
+	function rearmAnnouncements() {
+		R.announcedLevel = "idle";
+		R.guidedLevel = "idle";
 	}
 
 	/**
@@ -887,10 +898,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 			// whole point. Turning the nudges back on re-arms the announcements rather than staying quiet
 			// about a level the operator has not been told about.
 			if (muted) setLocked(false);
-			else {
-				R.announcedLevel = "idle";
-				R.guidedLevel = "idle";
-			}
+			else rearmAnnouncements();
 			refreshUi(ctx);
 			notify(
 				ctx,
@@ -987,8 +995,13 @@ export default function selfCompact(pi: ExtensionAPI) {
 		const problem = inert();
 		if (problem) notify(ctx, `self-compact REJECTED settings: ${problem}. Every tool is blocked until the flags are fixed.`, "error");
 
-		const recovered = recoverState(ctx.sessionManager.getBranch() as never[]);
+		const branch = ctx.sessionManager.getBranch() as never[];
+		const recovered = recoverState(branch);
 		R.state = recovered.state;
+		// Guidance already in the context stays there: a reload or /tree must not send it again.
+		for (const level of guidedLevelsSinceCompaction(branch)) {
+			if (level in LEVEL_ORDER && LEVEL_ORDER[level as UsageLevel] > LEVEL_ORDER[R.guidedLevel]) R.guidedLevel = level as UsageLevel;
+		}
 		const h = handoff();
 		if (h && recovered.journaledUnanswered) {
 			// Crash between journaling the handoff and the model's answer: resume without a user prompt.

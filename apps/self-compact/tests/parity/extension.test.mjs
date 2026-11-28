@@ -433,8 +433,10 @@ test('P3: each crossing puts one guidance message into the session and the conte
   assert.equal(await h.emit('context', { messages }), undefined);
   assert.equal(guidance(h).length, 1);
   assert.match(guidance(h)[0].content, /40,000 \/ 200,000 \(20.0%\).*160,000 remain, warn 50.0%/);
-  assert.equal(guidance(h)[0].options.deliverAs, 'steer');
+  // Appended at the end of the current turn, so it reaches the next call without starting a turn of its own.
+  assert.equal(guidance(h)[0].options.triggerTurn, false);
   assert.equal(guidance(h)[0].display, false);
+  assert.deepEqual(guidance(h)[0].details, { level: 'notice' });
   // More calls in the same phase add nothing and change nothing.
   h.usage(44000);
   assert.equal(await h.emit('context', { messages }), undefined);
@@ -442,6 +444,24 @@ test('P3: each crossing puts one guidance message into the session and the conte
   assert.equal(guidance(h).length, 1);
   assert.match(guidance(h)[0].content, /^40,000/);
   // The next line crossed sends the next message.
+  h.usage(105000);
+  await h.emit('turn_end');
+  assert.equal(guidance(h).length, 2);
+});
+
+test('P3: a reload or /tree does not send guidance that is already in the context', async t => {
+  const h = await host(t);
+  h.usage(45000);
+  await h.emit('turn_end');
+  assert.equal(guidance(h).length, 1);
+  // Pi journals the sent message as a custom_message entry.
+  const { customType, content, display, details } = guidance(h)[0];
+  h.entries.push({ type: 'custom_message', customType, content, display, details });
+  await h.emit('session_start', { reason: 'reload' });
+  await h.emit('session_tree');
+  await h.emit('turn_end');
+  assert.equal(guidance(h).length, 1);
+  // A line not yet guided still gets its message.
   h.usage(105000);
   await h.emit('turn_end');
   assert.equal(guidance(h).length, 2);
@@ -465,6 +485,12 @@ test('P2: invalid prompt files report errors without replacing the operator inpu
   assert.equal(guidance(h).length, 0);
   assert.equal(h.notices.filter(notice => /Prompt file is empty/.test(notice.message)).length, 1);
   assert.equal(await h.emit('tool_call', { toolName: 'read' }), undefined);
+  // Fixing the file mid-phase takes effect: the guidance for the line already crossed goes in once.
+  h.prompt('SOFT_SELF_COMPACT', 'fixed {{context_tokens}}');
+  await h.emit('context', { messages: [] });
+  await h.emit('context', { messages: [] });
+  assert.equal(guidance(h).length, 1);
+  assert.match(guidance(h)[0].content, /^fixed /);
   h.prompt('COMPACTION_MESSAGE', '  ');
   assert.deepEqual(await h.emit('session_before_compact', summaryEvent()), { cancel: true });
   assert.equal(h.requests.length, 0);
