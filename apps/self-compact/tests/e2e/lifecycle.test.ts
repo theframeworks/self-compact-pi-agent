@@ -102,7 +102,7 @@ test("lifecycle: thresholds, lock, self_compact, compaction, verbatim note, cont
 		const persistedRoles = eventsOfType(events, "message_end").map((e) => (e.message as { role?: string; customType?: string }).role + ":" + ((e.message as { customType?: string }).customType ?? ""));
 		assert.deepEqual(persistedRoles.filter((r) => r.startsWith("custom:")), Array(3).fill("custom:self-compact-guidance"), "one guidance message per crossing went through the model's turn");
 		const customMessages = eventsOfType(events, "entry_appended").filter((e) => (e.entry as { type?: string }).type === "custom_message");
-		assert.deepEqual(customMessages.map((e) => (e.entry as { customType?: string }).customType), [HANDOFF], "the only custom message appended as an entry is the handoff (steered guidance arrives through message_end)");
+		assert.deepEqual(customMessages.map((e) => (e.entry as { customType?: string }).customType), [HANDOFF], "the only custom message appended as an entry is the handoff (guidance appended mid-run arrives through message_end)");
 		assert.equal(persistedRoles.filter((r) => r === "user:").length, 1, "the only user message is the user's prompt");
 
 		// 3. Forced lock blocked an ordinary tool with a reason that names self_compact.

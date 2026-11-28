@@ -32,6 +32,8 @@ export const HANDOFF_TYPE = "self-compact-handoff";
 export const PHASE_ENTRY_TYPE = "self-compact-phase";
 /** customType of /self-compact-info cards. */
 export const INFO_ENTRY_TYPE = "self-compact-info";
+/** customType of the guidance messages sent to the LLM (one per threshold crossing, plus the idle "compact now" request). */
+export const GUIDANCE_TYPE = "self-compact-guidance";
 
 export function emptyState(): PersistedState {
 	return { version: 1, cycle: 0, locked: false };
@@ -84,6 +86,22 @@ export function recoverState(entries: EntryLike[]): RecoveredState {
 	const compactionLanded = entries.some((e) => e.type === "compaction" && (e.details as { handoffId?: string } | undefined)?.handoffId === h.id);
 	if (compactionLanded || h.status === "ready") state.handoff = { ...h, status: "ready" };
 	return result;
+}
+
+/**
+ * The levels whose guidance is already in the context: the `level` in the details of each guidance message after
+ * the latest compaction. A reload re-arms from these instead of sending the same guidance again.
+ */
+export function guidedLevelsSinceCompaction(entries: EntryLike[]): string[] {
+	const levels: string[] = [];
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i]!;
+		if (entry.type === "compaction") break;
+		if (entry.type !== "custom_message" || entry.customType !== GUIDANCE_TYPE) continue;
+		const level = (entry.details as { level?: unknown } | undefined)?.level;
+		if (typeof level === "string") levels.push(level);
+	}
+	return levels;
 }
 
 export interface UsageLike {
