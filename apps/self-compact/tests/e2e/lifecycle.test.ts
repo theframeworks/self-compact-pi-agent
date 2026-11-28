@@ -1,8 +1,8 @@
 /**
  * Deterministic end-to-end lifecycle through the real CLI (`pi --mode rpc`) with the scripted
  * provider: notice -> warning -> forced lock -> self_compact -> compaction -> note returned
- * verbatim -> continuation writes result.txt = done. Guidance reaches the model as transient
- * messages (never persisted), so the transcript only carries the user's own prompt.
+ * verbatim -> continuation writes result.txt = done. Guidance reaches the model as one persisted
+ * message per threshold crossing, so the provider's prompt cache keeps matching.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -91,7 +91,7 @@ test("lifecycle: thresholds, lock, self_compact, compaction, verbatim note, cont
 		assert.equal(settled.length, 1, "the run settles once, after the work resumed from the note");
 		assert.ok(events.indexOf(handoffEvent) < events.indexOf(settled[0]!), "the note came back before the run settled");
 
-		// 2. Guidance reached the model as transient messages with live values, and nothing extra was persisted.
+		// 2. Guidance reached the model once per crossing, with the values at that moment, kept in the session as is.
 		const turns = trace(t.traceFile).filter((r) => r.kind === "turn");
 		const seen = (marker: RegExp) => turns.find((r) => marker.test(r.lastText ?? ""));
 		assert.ok(seen(/^\[self-compact · \uf05a\]/), "model saw the notice guidance");
@@ -100,9 +100,9 @@ test("lifecycle: thresholds, lock, self_compact, compaction, verbatim note, cont
 		assert.match(warning!.lastText ?? "", /Hard cutoff at 120,000/, "warning carries the live forced token count");
 		assert.ok(seen(/^\[self-compact · \uf023\]/), "model saw the forced guidance");
 		const persistedRoles = eventsOfType(events, "message_end").map((e) => (e.message as { role?: string; customType?: string }).role + ":" + ((e.message as { customType?: string }).customType ?? ""));
-		assert.equal(persistedRoles.filter((r) => r.startsWith("custom:")).length, 0, "no custom message went through the model's turn");
+		assert.deepEqual(persistedRoles.filter((r) => r.startsWith("custom:")), Array(3).fill("custom:self-compact-guidance"), "one guidance message per crossing went through the model's turn");
 		const customMessages = eventsOfType(events, "entry_appended").filter((e) => (e.entry as { type?: string }).type === "custom_message");
-		assert.deepEqual(customMessages.map((e) => (e.entry as { customType?: string }).customType), [HANDOFF], "the only persisted custom message is the handoff");
+		assert.deepEqual(customMessages.map((e) => (e.entry as { customType?: string }).customType), [HANDOFF], "the only custom message appended as an entry is the handoff (steered guidance arrives through message_end)");
 		assert.equal(persistedRoles.filter((r) => r === "user:").length, 1, "the only user message is the user's prompt");
 
 		// 3. Forced lock blocked an ordinary tool with a reason that names self_compact.

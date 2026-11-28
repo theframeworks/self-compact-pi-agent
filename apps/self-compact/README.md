@@ -33,8 +33,8 @@ Values are token counts (`270000`, `100k`, `1.5m`) or, where a share of the wind
 
 | File | When the model sees it |
 | --- | --- |
-| `USER_PROMPT_SOFT_SELF_COMPACT.md` | transient message on each call past the notice line |
-| `USER_PROMPT_WARNING_SELF_COMPACT.md` | transient message on each call past the warning line |
+| `USER_PROMPT_SOFT_SELF_COMPACT.md` | message sent once when the notice line is crossed |
+| `USER_PROMPT_WARNING_SELF_COMPACT.md` | message sent once when the warning line is crossed |
 | `USER_PROMPT_COMPACTION_MESSAGE.md` | system prompt of the summary call (`--compact-prompt` overrides it) |
 | `USER_PROMPT_SUMMARY_INSTRUCTIONS.md` | optional: replaces Pi's user instructions for the summary call |
 

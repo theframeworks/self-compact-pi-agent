@@ -108,7 +108,7 @@ function decide(context: Context): Plan {
 	}, -1);
 	const assistantCount = messages.slice(lastHandoff + 1).filter((m) => m.role === "assistant").length;
 	const usageTotal = BASE + STEP * assistantCount;
-	// Transient guidance arrives as a trailing user-role message; look past it for the real last message.
+	// Guidance steered in before this call arrives as a trailing user-role message; look past it for the real last message.
 	let lastIndex = messages.length - 1;
 	let guidance = "";
 	if (lastIndex >= 0 && messages[lastIndex]!.role === "user" && /^\[self-compact · (\uf05a|\uf071|\uf023)\]/.test(textOf((messages[lastIndex] as { content?: unknown }).content))) {
@@ -153,7 +153,7 @@ function decide(context: Context): Plan {
 		}
 	}
 
-	// Guidance-driven scenarios react to the transient message itself.
+	// Guidance-driven scenarios react to the guidance message itself.
 	if (guidance) {
 		if (/self-compact · \uf071/.test(guidance) && SCENARIO === "obey-warning") return handoffPlan(noteForMode(), usageTotal);
 		if (/self-compact · \uf05a/.test(guidance) && SCENARIO === "obey-notice") return handoffPlan(noteForMode(), usageTotal);
