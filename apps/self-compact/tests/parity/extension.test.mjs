@@ -93,6 +93,11 @@ async function host(t, flags = {}, settings = { compaction: { keepRecentTokens: 
   };
 }
 
+/** The guidance messages put into the session at threshold crossings (the follow-up nudge triggers a turn; these don't). */
+function guidance(h) {
+  return h.messages.filter(m => m.customType === 'self-compact-guidance' && !m.options?.triggerTurn);
+}
+
 function summaryEvent(overrides = {}) {
   return {
     reason: 'manual', signal: new AbortController().signal,
@@ -166,7 +171,9 @@ test('P1: compaction that keeps failing falls back to Pi\'s summary, then return
   await h.emit('message_end', { message: { role: 'custom', customType: 'self-compact-handoff', details: handoff[0].details } });
   await h.emit('turn_end');
   assert.equal(await h.emit('tool_call', { toolName: 'read' }), undefined);
-  assert.equal((await h.emit('context', { messages: [] })).messages.length, 0);
+  const sent = guidance(h).length;
+  await h.emit('context', { messages: [] });
+  assert.equal(guidance(h).length, sent, 'no new guidance while standing down');
   await h.emit('session_compact', { reason: 'threshold' });
   await h.emit('turn_end');
   assert.equal(await h.emit('tool_call', { toolName: 'read' }), undefined, 'lockTools off: the cutoff no longer blocks after a give-up');
@@ -373,6 +380,7 @@ test('P1: a successful in-run handoff after a give-up re-arms the guidance', asy
   assert.equal(await h.emit('tool_call', { toolName: 'read' }), undefined, 'standing down after the give-up');
   // The summarizer works again, and the agent hands off on its own.
   h.prompt('COMPACTION_MESSAGE', 'Summarize.');
+  const sent = guidance(h).length;
   await h.execute('NEXT ACTION: second');
   const result = await h.emit('agent_before_settle', { entries: [], continue: false, outcome: 'completed' });
   assert.equal(result.continue, true);
@@ -382,7 +390,7 @@ test('P1: a successful in-run handoff after a give-up re-arms the guidance', asy
   // The work goes on until the context is past the hard cutoff again.
   h.entries.push(...seedEntries().map(entry => ({ ...entry, id: `after-${entry.id}` })));
   await h.emit('turn_end');
-  assert.ok((await h.emit('context', { messages: [] })).messages.length > 0, 'the guidance re-arms after the in-run success');
+  assert.equal(guidance(h).length, sent + 1, 'the guidance re-arms after the in-run success');
 });
 
 test('P1: a note that only waits to be read lets Pi\'s automatic compaction through and keeps the tools unlocked', async t => {
@@ -403,31 +411,40 @@ test('P1: a note that only waits to be read lets Pi\'s automatic compaction thro
 
 test('P1: final-answer crossing requests one follow-up, soft advice does not', async t => {
   const h = await host(t);
+  const followUps = () => h.messages.filter(message => message.options?.triggerTurn).length;
   h.usage(45000);
   await h.emit('agent_end');
-  assert.equal(h.messages.length, 0);
+  assert.equal(followUps(), 0);
   h.usage(110000);
   await h.emit('agent_end');
   await h.emit('agent_end');
-  assert.equal(h.messages.filter(message => message.options?.triggerTurn).length, 1);
+  assert.equal(followUps(), 1);
   await h.execute();
   await h.emit('agent_end');
-  assert.equal(h.messages.length, 1);
+  assert.equal(followUps(), 1);
 });
 
-test('P3: context refreshes one live guidance message and supports harness templates', async t => {
+test('P3: each crossing puts one guidance message into the session and the context is never rewritten', async t => {
   const h = await host(t);
   h.prompt('SOFT_SELF_COMPACT', '{{context_tokens}} / {{context_window}} ({{context_percent}}%). {{remaining_tokens}} remain, warn {{warning_percent}}%.');
   h.usage(40000);
-  const first = await h.emit('context', { messages: [] });
-  assert.equal(first.messages.length, 1);
-  assert.match(first.messages[0].content, /40,000 \/ 200,000 \(20.0%\).*160,000 remain, warn 50.0%/);
+  const messages = [{ role: 'user', content: 'current prompt', timestamp: 3 }];
+  // The prompt cache needs a stable prefix: the context hook leaves the messages alone.
+  assert.equal(await h.emit('context', { messages }), undefined);
+  assert.equal(guidance(h).length, 1);
+  assert.match(guidance(h)[0].content, /40,000 \/ 200,000 \(20.0%\).*160,000 remain, warn 50.0%/);
+  assert.equal(guidance(h)[0].options.deliverAs, 'steer');
+  assert.equal(guidance(h)[0].display, false);
+  // More calls in the same phase add nothing and change nothing.
   h.usage(44000);
-  const second = await h.emit('context', first);
-  assert.equal(second.messages.length, 1);
-  assert.match(second.messages[0].content, /44,000.*22.0%/);
-  h.prompt('SOFT_SELF_COMPACT', 'UPDATED {{context_tokens}}');
-  assert.match((await h.emit('context', second)).messages[0].content, /UPDATED 44,000/);
+  assert.equal(await h.emit('context', { messages }), undefined);
+  await h.emit('turn_end');
+  assert.equal(guidance(h).length, 1);
+  assert.match(guidance(h)[0].content, /^40,000/);
+  // The next line crossed sends the next message.
+  h.usage(105000);
+  await h.emit('turn_end');
+  assert.equal(guidance(h).length, 2);
 });
 
 test('P3: tool preflight, turn boundary, and model change enforce newly crossed hard cutoff', async t => {
@@ -443,8 +460,9 @@ test('P2: invalid prompt files report errors without replacing the operator inpu
   const h = await host(t);
   h.prompt('SOFT_SELF_COMPACT', '  ');
   h.usage(45000);
-  assert.equal((await h.emit('context', { messages: [] })).messages.length, 0);
   await h.emit('context', { messages: [] });
+  await h.emit('context', { messages: [] });
+  assert.equal(guidance(h).length, 0);
   assert.equal(h.notices.filter(notice => /Prompt file is empty/.test(notice.message)).length, 1);
   assert.equal(await h.emit('tool_call', { toolName: 'read' }), undefined);
   h.prompt('COMPACTION_MESSAGE', '  ');
@@ -642,7 +660,8 @@ test('P5: nothing to compact -> self_compact refuses, no lock, no guidance', asy
   h.usage(125000);
   await h.emit('turn_end');
   assert.equal(await h.emit('tool_call', { toolName: 'read' }), undefined, 'forced level does not lock when compaction is impossible');
-  assert.equal((await h.emit('context', { messages: [] })).messages.length, 0, 'no guidance when there is nothing to cut');
+  await h.emit('context', { messages: [] });
+  assert.equal(guidance(h).length, 0, 'no guidance when there is nothing to cut');
   await assert.rejects(h.execute('NEXT ACTION: continue'), /Nothing to compact yet: Pi keeps the newest 10,000,000 tokens/);
   assert.equal(h.entries.filter(entry => entry.customType === 'self-compact-state').length, 0, 'no note was saved');
   const view = JSON.parse((await h.view()).content[0].text);

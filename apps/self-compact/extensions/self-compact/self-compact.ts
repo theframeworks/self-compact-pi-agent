@@ -6,9 +6,10 @@
  *      [--compact-soft-at 100k] [--compact-at 140k] [--compact-buffer 30k] [--compact-prompt "..."]
  *
  * - Three thresholds (notice / warning / forced) resolved against the active model window, capped at 90%.
- * - Guidance reaches the model as a transient message on each LLM call while a phase is active
- *   (the `context` hook); it is never persisted into the model's context. Each threshold crossing shows the full
- *   guidance message once in the TUI. The transcript otherwise only shows the user's prompts and the returned note.
+ * - Guidance reaches the model as one message per threshold crossing, delivered before the next model call and
+ *   kept in the session unchanged, so the provider's prompt cache keeps matching (a message rebuilt for every call
+ *   rewrote the whole context to the cache on each turn). Each threshold crossing shows the full guidance message
+ *   once in the TUI. The transcript otherwise only shows the user's prompts and the returned note.
  * - `view_context()` returns used tokens, percent, level, and the thresholds as JSON, since the model cannot see the footer.
  * - At the forced threshold every tool except `self_compact` and `view_context` is blocked in `tool_call` with an
  *   explicit reason (the active tool list is never narrowed: Pi would answer "Tool X not found" before the hook).
@@ -107,7 +108,7 @@ export const STATUS_KEY = "self-compact";
 export const FEED_EVENT = "self-compact:updated";
 
 /** Static system-prompt line: never changes between calls so the prompt-cache prefix stays stable. */
-const SYSTEM_PROMPT_LINE = `\n\nself-compact: when context usage crosses a threshold you receive a transient [self-compact · …] message with live numbers. You cannot see your own context usage otherwise: call view_context (no arguments) whenever you need the current numbers as JSON, for example after a compaction or before deciding to compact; do not poll it every turn. After a compaction, your own saved note_to_self is returned to you verbatim as the next message (exactly the note text, nothing else); resume its NEXT ACTION without another user message and never restart work the note marks as done. If no work remains, report completion and stop.`;
+const SYSTEM_PROMPT_LINE = `\n\nself-compact: when context usage crosses a threshold you receive one [self-compact · …] message with the numbers at that moment. You cannot see your own context usage otherwise: call view_context (no arguments) whenever you need the current numbers as JSON, for example after a compaction or before deciding to compact; do not poll it every turn. After a compaction, your own saved note_to_self is returned to you verbatim as the next message (exactly the note text, nothing else); resume its NEXT ACTION without another user message and never restart work the note marks as done. If no work remains, report completion and stop.`;
 
 /** A compaction summary, or the reason none could be written. Undefined when the summary was cancelled. */
 type SummaryOutcome = { compaction: CompactionResult } | { error: string } | undefined;
@@ -135,6 +136,8 @@ interface Runtime {
 	/** Context epoch: bumps on every compaction and session start so per-epoch guidance re-arms. */
 	epoch: number;
 	announcedLevel: UsageLevel;
+	/** The highest level whose guidance went into the session this epoch; it can trail announcedLevel while there is nothing to compact. */
+	guidedLevel: UsageLevel;
 	compactionInFlight: boolean;
 	lastCompactionError?: string;
 	retryTimer?: ReturnType<typeof setTimeout>;
@@ -163,10 +166,6 @@ function nowPrompt(saved?: string): string {
 	const base = `Compact now: write your note_to_self (max ${NOTE_MAX_CHARS} chars: goal, DONE with exact paths and commands, IN PROGRESS, key decisions, verified test results, exact NEXT ACTION last) and call ${TOOL_NAME} as your only tool call.`;
 	if (!saved) return base;
 	return `${base}\n\nA note is already saved from a previous attempt. Pass it to ${TOOL_NAME} verbatim instead of inventing a new one. Saved note, verbatim:\n\n${saved}\n\n---\nCall ${TOOL_NAME} now with exactly that note.`;
-}
-
-function guidanceMessage(text: string) {
-	return { role: "custom" as const, customType: GUIDANCE_TYPE, content: text, display: false, timestamp: Date.now() };
 }
 
 function levelColor(level: UsageLevel): "dim" | "accent" | "warning" | "error" | "muted" {
@@ -241,6 +240,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 		state: emptyState(),
 		epoch: 0,
 		announcedLevel: "idle",
+		guidedLevel: "idle",
 		compactionInFlight: false,
 		alive: true,
 		idleRequestEpoch: -1,
@@ -478,6 +478,9 @@ export default function selfCompact(pi: ExtensionAPI) {
 			pi.appendEntry(PHASE_ENTRY_TYPE, { level, tokens: R.usage.tokens, percent: R.usage.percent, contextWindow: R.thresholds?.contextWindow, warnTokens: R.thresholds?.warnTokens, forcedTokens: R.thresholds?.forcedTokens, text, at: Date.now() });
 			if (ctx.mode !== "tui") notify(ctx, `self-compact: ${levelTag(level).toLowerCase()} threshold crossed at ${formatPct(R.usage.percent, 1)}${level === "forced" ? `; tools locked until ${TOOL_NAME} runs` : ""}`, level === "forced" ? "error" : level === "warning" ? "warning" : "info");
 		}
+		// Guidance waits until there is something to compact, then goes in once for the highest level reached.
+		const guided = locked() ? "forced" : level;
+		if (LEVEL_ORDER[guided] > LEVEL_ORDER[R.guidedLevel] && sendGuidance(ctx)) R.guidedLevel = guided;
 	}
 
 	/** The guidance message for a level, rendered from the prompt files with current usage. */
@@ -487,7 +490,32 @@ export default function selfCompact(pi: ExtensionAPI) {
 		return renderTemplate(loadPromptFile("warning", R.searchDirs).text, templateValues());
 	}
 
-	/** One transient guidance message is rebuilt from current usage for every LLM call. */
+	/**
+	 * Puts the guidance for the level reached into the session, once; true when it is dealt with (sent, or its prompt
+ * file reported broken), false when none is due yet. It is delivered before the next model call
+	 * and never changed or removed afterwards, so the prompt-cache prefix stays stable; live numbers are behind
+	 * view_context. A prompt file that fails to render is reported once, and only the warning falls back to the
+	 * built-in text.
+	 */
+	function sendGuidance(ctx: ExtensionContext): boolean {
+		let text: string | undefined;
+		let failed = false;
+		try {
+			text = guidanceText(ctx);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (!R.promptErrors.has(message)) {
+				R.promptErrors.add(message);
+				notify(ctx, `self-compact: ${message}`, "warning");
+			}
+			failed = true;
+			if (R.level === "warning") text = renderTemplate(BUILTIN_PROMPTS.warning, templateValues());
+		}
+		if (text) pi.sendMessage({ customType: GUIDANCE_TYPE, content: text, display: false }, { deliverAs: "steer" });
+		return Boolean(text) || failed;
+	}
+
+	/** The guidance for the current level, or undefined when none is due. */
 	function guidanceText(ctx: ExtensionContext): string | undefined {
 		if (nudgesStoodDown() || !R.thresholds) return undefined;
 		const level = locked() ? "forced" : R.level;
@@ -510,6 +538,7 @@ export default function selfCompact(pi: ExtensionAPI) {
 	function rearm() {
 		R.epoch += 1;
 		R.announcedLevel = "idle";
+		R.guidedLevel = "idle";
 		R.compactionInFlight = false;
 		R.standingDown = false;
 	}
@@ -858,7 +887,10 @@ export default function selfCompact(pi: ExtensionAPI) {
 			// whole point. Turning the nudges back on re-arms the announcements rather than staying quiet
 			// about a level the operator has not been told about.
 			if (muted) setLocked(false);
-			else R.announcedLevel = "idle";
+			else {
+				R.announcedLevel = "idle";
+				R.guidedLevel = "idle";
+			}
 			refreshUi(ctx);
 			notify(
 				ctx,
@@ -1018,21 +1050,10 @@ export default function selfCompact(pi: ExtensionAPI) {
 		return { systemPrompt: event.systemPrompt + SYSTEM_PROMPT_LINE };
 	});
 
-	pi.on("context", async (event, ctx) => {
+	// The messages are left untouched: rewriting them on every call would break the provider's prompt cache. Guidance
+	// goes into the session once per crossing (trackLevel), where it stays put.
+	pi.on("context", async (_event, ctx) => {
 		trackLevel(ctx);
-		const messages = event.messages.filter(message => !(message.role === "custom" && message.customType === GUIDANCE_TYPE));
-		try {
-			const text = guidanceText(ctx);
-			if (text) messages.push(guidanceMessage(text));
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			if (!R.promptErrors.has(message)) {
-				R.promptErrors.add(message);
-				notify(ctx, `self-compact: ${message}`, "warning");
-			}
-			if (R.level === "warning") messages.push(guidanceMessage(renderTemplate(BUILTIN_PROMPTS.warning, templateValues())));
-		}
-		return { messages };
 	});
 
 	pi.on("message_end", async (event, ctx) => {
